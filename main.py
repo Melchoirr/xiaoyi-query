@@ -4,6 +4,7 @@
 
 from typing import Generator
 from contextlib import asynccontextmanager
+
 import numpy as np
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -22,6 +23,7 @@ from api.schemas import (
     StatsResponse,
     SearchResultItem
 )
+from api.routes_agent import router as agent_router
 
 
 COLLECTION_NAME = "time_series_rag"
@@ -51,6 +53,15 @@ async def lifespan(app: FastAPI):
         vector_size=encoder_instance.get_embedding_dim()
     )
 
+    # 将已初始化的 Layer-1 单例注入 Agent Router
+    from api import routes_agent
+    routes_agent.inject_layer1_instances(
+        processor=processor_instance,
+        encoder=encoder_instance,
+        retriever=retriever_instance,
+        ranker=ranker_instance,
+    )
+
     yield
 
     processor_instance = None
@@ -73,6 +84,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Layer 2: Agentic Router
+app.include_router(agent_router)
 
 
 def get_processor() -> TSProcessor:

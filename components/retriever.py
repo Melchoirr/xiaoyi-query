@@ -95,28 +95,39 @@ class QdrantRetriever:
         collection_name: str,
         query_vector: List[float],
         top_k: int = 5,
-        score_threshold: float = None
+        score_threshold: float = None,
+        query_filter: Dict[str, Any] = None,
     ) -> List[Dict[str, Any]]:
         """
-        搜索最相似的Top-K向量
+        搜索最相似的Top-K向量（支持 Payload 过滤条件）
 
         Args:
             collection_name: 集合名称
             query_vector: 查询向量
             top_k: 返回的最相似结果数量
             score_threshold: 相似度阈值
+            query_filter: Qdrant Filter 条件字典，由 TimeRAGAgent.parse_intent() 生成。
+                         支持 must / should / must_not 子句。
+                         例如: {"must": [{"key": "is_weekend", "match": {"value": True}}]}
+                         传入 None 则不做 Payload 过滤（纯向量检索）。
 
         Returns:
             搜索结果列表，每项包含 id, score, payload
         """
-        search_results = self.client.search(
+        search_kwargs = dict(
             collection_name=collection_name,
             query_vector=query_vector,
             limit=top_k,
             score_threshold=score_threshold,
             with_vectors=False,
-            with_payload=True
+            with_payload=True,
         )
+
+        if query_filter is not None:
+            from qdrant_client.models import Filter
+            search_kwargs["query_filter"] = Filter(**query_filter)
+
+        search_results = self.client.search(**search_kwargs)
 
         results = []
         for result in search_results:

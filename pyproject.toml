@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.135.1",
     "numpy>=2.4.3",
     "onnxruntime>=1.24.4",
+    "openai>=1.65.0",
     "pandas>=3.0.1",
     "pydantic>=2.12.5",
     "qdrant-client>=1.17.1",
