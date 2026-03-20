@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Qdrant local storage
+*_data/
+
+# ONNX model (auto-generated, can be regenerated)
+*.onnx
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Lock files (keep uv.lock)
+# uv.lock
+
+# Logs
+*.log
