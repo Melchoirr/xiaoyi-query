@@ -114,23 +114,19 @@ class QdrantRetriever:
         Returns:
             搜索结果列表，每项包含 id, score, payload
         """
-        search_kwargs = dict(
+        from qdrant_client.models import Filter as QdrantFilter
+
+        search_results = self.client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             score_threshold=score_threshold,
-            with_vectors=False,
             with_payload=True,
+            query_filter=QdrantFilter(**query_filter) if query_filter else None,
         )
 
-        if query_filter is not None:
-            from qdrant_client.models import Filter
-            search_kwargs["query_filter"] = Filter(**query_filter)
-
-        search_results = self.client.search(**search_kwargs)
-
         results = []
-        for result in search_results:
+        for result in search_results.points:
             results.append({
                 "id": result.id,
                 "score": result.score,

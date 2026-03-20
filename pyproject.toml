@@ -13,10 +13,12 @@ dependencies = [
     "pydantic>=2.12.5",
     "qdrant-client>=1.17.1",
     "scikit-learn>=1.8.0",
+    "scipy>=1.15.0",
     "uvicorn>=0.42.0",
     "xgboost>=3.2.0",
     "torch",
     "onnxscript>=0.6.2",
+    "ts2vec>=0.1",
 ]
 
 [[tool.uv.index]]

@@ -35,14 +35,16 @@ from core.processor import TSProcessor
 from components.encoder import ONNXEncoder
 from components.retriever import QdrantRetriever
 from components.ranker import FusionRanker
+from core.config import cfg
 
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v2/agent", tags=["Layer 2 — Agentic"])
 
-INPUT_LENGTH = 100
-COLLECTION_NAME = "time_series_rag"
+# 从 config.py 读取（与 main.py 保持一致）
+_input_length = cfg.system.input_length
+_collection_name = cfg.system.qdrant_collection
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +138,7 @@ def set_agent(agent: TimeRAGAgent) -> None:
 
 1. **意图解析** — 调用 LLM 将 `user_query` 映射为 Qdrant Filter 条件
 2. **向量检索** — 将 `history_x` 归一化 → ONNX 编码 → Qdrant 向量检索
-3. **IDW 融合** — 使用 FusionRanker 对召回片段做逆距离加权融合
+3. **精排融合（Layer 3）** — XGBoost 精排模型打分 + Softmax 融合
 4. **报告生成** — 调用 LLM 结合预测数值和召回元数据生成结构化报告
 
 **示例请求:**
@@ -150,8 +152,9 @@ def set_agent(agent: TimeRAGAgent) -> None:
 ```
 
 **前置条件:**
-- `OPENAI_API_KEY` 环境变量已配置
-- Qdrant 中已摄入包含时间特征的向量数据（Layer 1 摄入脚本需使用更新后的 ingest_ett.py）
+- LLM API Key 已配置（支持 OpenAI / DeepSeek / Qwen / Ollama，见 core/config.py）
+- Qdrant 中已摄入包含时间特征的向量数据
+- 可选：models/xgb_ranker.json 已训练（未训练时自动降级为 IDW 融合）
     """,
     responses={
         200: {"description": "预测成功"},
@@ -160,22 +163,52 @@ def set_agent(agent: TimeRAGAgent) -> None:
     },
 )
 async def agent_forecast(
-    request: AgentForecastRequest,
     processor: TSProcessor = Depends(get_processor),
     encoder: ONNXEncoder = Depends(get_encoder),
     retriever: QdrantRetriever = Depends(get_retriever),
     ranker: FusionRanker = Depends(get_ranker),
     agent: TimeRAGAgent = Depends(get_agent),
+    request: AgentForecastRequest = None,
 ) -> AgentForecastResponse:
     """
-    Agentic 时序预测接口。
+    Agentic 时序预测接口 — 完整编排链路（Step 1~8）：
+
+    Step 1: TimeRAGAgent.parse_intent(user_query)
+        调用 LLM 将自然语言查询解析为 Qdrant Filter 条件。
+        例: "周末晚上用电高峰" → {"must": [{"key":"is_weekend","match":{"value":true}},
+                                            {"key":"time_of_day","match":{"value":"evening"}}]}
+
+    Step 2: TSProcessor.normalize(history_x)
+        对输入的 100 维历史序列做 Z-Score 归一化，返回 (normalized, mu, sigma)。
+
+    Step 3: ONNXEncoder.encode(normalized)
+        调用预训练 Foundation Model ONNX 模型，将归一化序列编码为 256 维稠密向量。
+
+    Step 4: QdrantRetriever.search(query_vector, query_filter)
+        以向量相似度为主、Filter 条件为辅，执行混合检索，召回 Top-K 相关片段。
+        若 Filter 过严导致零召回，自动降级为无过滤检索（保证有结果可用）。
+
+    Step 5: FusionRanker.rank_and_fuse(query_metadata, search_results, future_length)
+        Layer 3 精排融合：XGBoost 精排模型对 Top-K 片段打质量分，Softmax 归一化为概率权重，
+        加权求和输出融合预测 y_hat。反归一化: y_hat = fused_normalized * sigma + mu。
+
+    Step 6: Payload 反归一化
+        将每条召回记录的 future_y（存储在归一化空间）用自己的 mu/sigma 还原，
+        用于 Step 7 的报告生成。
+
+    Step 7: TimeRAGAgent.generate_report(user_query, fused_prediction, retrieved_metadata)
+        调用 LLM，结合原始问题、预测数值和召回片段元数据，
+        生成具有解释性的专业分析报告（Markdown 格式）。
+
+    Step 8: 返回统一 JSON 响应
+        包含 prediction_values（数值预测）和 ai_analysis_report（文字解析）两个字段。
 
     参数:
         request: AgentForecastRequest
-        processor: TSProcessor — Z-Score 归一化/反归一化
-        encoder: ONNXEncoder — 1D-CNN 向量化
+        processor: TSProcessor — Z-Score 归一化 / 反归一化
+        encoder: ONNXEncoder — 预训练 Foundation Model 向量化
         retriever: QdrantRetriever — 向量 + Payload 过滤检索
-        ranker: FusionRanker — IDW 融合
+        ranker: FusionRanker — Layer 3 XGBoost 精排 + Softmax 融合（未训练时降级为 IDW）
         agent: TimeRAGAgent — LLM 意图解析 + 报告生成
     """
     # ------------------------------------------------------------------
@@ -194,10 +227,10 @@ async def agent_forecast(
     # Step 2: 输入校验 + 归一化
     # ------------------------------------------------------------------
     history = request.history_x
-    if len(history) != INPUT_LENGTH:
+    if len(history) != _input_length:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"history_x 长度必须为 {INPUT_LENGTH}，实际 {len(history)}",
+            detail=f"history_x 长度必须为 {_input_length}，实际 {len(history)}",
         )
 
     normalized, mu, sigma = processor.normalize(history)
@@ -217,7 +250,7 @@ async def agent_forecast(
     )
 
     search_results = retriever.search(
-        collection_name=COLLECTION_NAME,
+        collection_name=_collection_name,
         query_vector=query_vector,
         top_k=request.top_k,
         query_filter=intent_filter if has_filter else None,
@@ -233,7 +266,7 @@ async def agent_forecast(
             f"filter={intent_filter}"
         )
         search_results = retriever.search(
-            collection_name=COLLECTION_NAME,
+            collection_name=_collection_name,
             query_vector=query_vector,
             top_k=request.top_k,
             query_filter=None,
@@ -247,8 +280,16 @@ async def agent_forecast(
         if first_future:
             future_length = len(first_future)
 
-    fused_normalized = ranker.rank(
-        search_results=search_results,
+    # Step 5: Layer 3 精排融合预测（XGBoost 精排 + Softmax）
+    # 构造 query_metadata，传入 rank_and_fuse 用于交叉特征构造
+    query_metadata = {
+        "mu": mu,
+        "sigma": sigma,
+    }
+
+    fused_normalized = ranker.rank_and_fuse(
+        query_metadata=query_metadata,
+        retrieved_items=search_results,
         future_length=future_length,
     )
 
@@ -298,9 +339,9 @@ async def agent_forecast(
     # ------------------------------------------------------------------
     # Step 7: 生成 LLM 报告
     # ------------------------------------------------------------------
-    report = ""
+    ai_report = ""
     try:
-        report = agent.generate_report(
+        ai_report = agent.generate_report(
             user_query=request.user_query,
             fused_prediction=prediction_list,
             retrieved_metadata=[
@@ -320,23 +361,23 @@ async def agent_forecast(
         )
     except ReportGenerationError as exc:
         logger.warning(f"报告生成失败，降级为空报告: {exc}")
-        report = (
+        ai_report = (
             "[报告生成失败] LLM 调用失败，请检查 API Key 或稍后重试。"
             f"\n原始错误: {exc}"
         )
     except Exception as exc:
         logger.error(f"报告生成未知错误: {exc}")
-        report = f"[报告生成失败] 未知错误: {exc}"
+        ai_report = f"[报告生成失败] 未知错误: {exc}"
 
     # ------------------------------------------------------------------
-    # Step 8: 构建响应
+    # Step 8: 构建统一响应（prediction_values + ai_analysis_report 均始终返回）
     # ------------------------------------------------------------------
     return AgentForecastResponse(
         success=True,
         intent_filter=intent_filter,
-        prediction=prediction_list if request.include_raw_prediction else [],
+        prediction_values=prediction_list,
         retrieved_chunks=retrieved_chunks,
-        report=report,
+        ai_analysis_report=ai_report,
         message=f"基于 Top-{len(search_results)} 相似片段{'（含过滤）' if has_filter else '（无过滤）'}预测，共召回 {len(search_results)} 条",
     )
 

@@ -45,10 +45,6 @@ class AgentForecastRequest(BaseModel):
         le=100,
         description="向量检索返回的最近邻数量（建议 5~20）",
     )
-    include_raw_prediction: bool = Field(
-        default=False,
-        description="是否在响应中包含原始数值预测（不含 LLM 报告）",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +90,11 @@ class AgentForecastResponse(BaseModel):
     Layer 2 Agentic Forecast 响应
 
     包含:
-        - intent_filter:    LLM 解析出的 Qdrant Filter 条件（透明展示）
-        - prediction:        IDW/XGBoost 融合后的预测序列（已反归一化）
-        - retrieved_chunks: Top-K 召回片段的元数据摘要
-        - report:           LLM 生成的深度分析报告（Markdown 格式）
+        - intent_filter:       LLM 解析出的 Qdrant Filter 条件（透明展示）
+        - prediction_values:   IDW/XGBoost 融合后的预测数值序列（已反归一化，始终返回）
+        - retrieved_chunks:    Top-K 召回片段的元数据摘要
+        - report:             LLM 生成的文字解析 / 深度分析报告（Markdown 格式）
+        - message:            补充说明（召回数量、过滤状态等）
     """
 
     success: bool = Field(..., description="请求是否成功")
@@ -105,15 +102,15 @@ class AgentForecastResponse(BaseModel):
         ...,
         description="LLM 解析出的 Qdrant Filter 条件，可用于 Debug",
     )
-    prediction: List[float] = Field(
-        default_factory=list,
-        description="融合预测序列（已反归一化）",
+    prediction_values: List[float] = Field(
+        ...,
+        description="融合预测序列（已反归一化），始终返回的数值预测结果",
     )
     retrieved_chunks: List[RetrievedChunk] = Field(
         default_factory=list,
         description="Top-K 召回片段的元数据摘要",
     )
-    report: str = Field(
+    ai_analysis_report: str = Field(
         default="",
         description="LLM 生成的深度分析报告（Markdown 格式）",
     )

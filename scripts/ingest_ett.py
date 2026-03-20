@@ -32,7 +32,8 @@ from components.retriever import QdrantRetriever
 COLLECTION_NAME = "time_series_rag"
 INPUT_LENGTH = 100
 STORAGE_PATH = "./qdrant_data"
-ONNX_PATH = "encoder_v1.onnx"
+# 预训练时序基础模型 TS2Vec ONNX 编码器（由 scripts/export_foundation_model.py 导出）
+ONNX_PATH = "models/foundation_encoder.onnx"
 DEFAULT_FUTURE_LENGTH = 48
 BATCH_SIZE = 500
 

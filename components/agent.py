@@ -146,27 +146,46 @@ retrieved_chunks: {chunks_json}
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
         timeout: float = 30.0,
     ):
         """
         Args:
-            model:      LLM 模型名称，默认 gpt-4o-mini
-            api_key:    OpenAI API Key，默认从环境变量 OPENAI_API_KEY 读取
+            model:      LLM 模型名称。默认从 core/config.py 读取（cfg.llm.model）
+            api_key:    API Key。默认从 core/config.py 的 LLMConfig 读取（支持多 Provider）
             temperature: 生成温度，parse_intent 用 0.0（确定性），
                         generate_report 可在构造后通过参数覆盖
             timeout:    单次 API 调用超时（秒）
         """
-        resolved_key = api_key or os.environ.get("OPENAI_API_KEY")
+        from core.config import cfg
+
+        llm_cfg = cfg.llm
+
+        resolved_key = api_key or llm_cfg.api_key
         if not resolved_key:
             raise ValueError(
-                "OPENAI_API_KEY 未设置。请在环境变量中配置，或在构造 TimeRAGAgent 时传入 api_key 参数。"
+                f"[TimeRAGAgent] LLM API Key 未设置。\n"
+                f"请通过以下任一方式配置:\n"
+                f"  1. 在 .env 文件中设置 {llm_cfg.provider.upper()}_API_KEY\n"
+                f"  2. 在 .env 文件中设置 OPENAI_API_KEY\n"
+                f"  3. 传入 api_key 参数\n"
+                f"  4. 修改 core/config.py 中的 llm 配置"
             )
 
-        self._client = OpenAI(api_key=resolved_key, timeout=timeout)
-        self._model = model
+        resolved_model = model or llm_cfg.model
+        resolved_base_url = llm_cfg.base_url
+
+        self._client = OpenAI(
+            api_key=resolved_key,
+            base_url=resolved_base_url if resolved_base_url else None,
+            timeout=timeout,
+        )
+        self._model = resolved_model
+        self._temperature = temperature
+        self._timeout = timeout
+        self._provider = llm_cfg.provider
         self._temperature = temperature
         self._timeout = timeout
 

@@ -10,6 +10,7 @@ import numpy as np
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from core.config import cfg
 from core.processor import TSProcessor
 from components.encoder import ONNXEncoder
 from components.retriever import QdrantRetriever
@@ -26,10 +27,15 @@ from api.schemas import (
 from api.routes_agent import router as agent_router
 
 
-COLLECTION_NAME = "time_series_rag"
-INPUT_LENGTH = 100
-STORAGE_PATH = "./qdrant_data"
-ONNX_PATH = "encoder_v1.onnx"
+# ---------------------------------------------------------------------------
+# 从 config.py 读取全局常量（取代硬编码）
+# ---------------------------------------------------------------------------
+_system_cfg = cfg.system
+
+COLLECTION_NAME = _system_cfg.qdrant_collection
+INPUT_LENGTH = _system_cfg.input_length
+STORAGE_PATH = _system_cfg.qdrant_storage_path
+ONNX_PATH = str(_system_cfg.get_encoder_path())
 
 
 processor_instance: TSProcessor = None
@@ -213,12 +219,12 @@ async def predict(
     ranker: FusionRanker = Depends(get_ranker)
 ):
     """
-    基于检索的时序预测
+    基于检索的时序预测（Layer 1 数值链路）
 
     - 接收history_x作为查询
     - 归一化并编码为向量
     - 在Qdrant中检索Top-K相似记录
-    - 使用IDW融合算法生成预测
+    - 使用精排融合（Layer 3 XGBoost/IDW）生成预测
     - 反归一化得到真实量级预测
     """
     try:
