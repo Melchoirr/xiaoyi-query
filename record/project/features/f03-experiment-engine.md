@@ -1,53 +1,38 @@
 # [F03] 实验引擎
 
-> 最后更新：2026-03-22 17:30 (UTC+8)
+## 状态
 
-## 概述
-训练/验证/测试的完整实验循环。Exp_Basic 基类管理设备和模型构建，Exp_Long_Term_Forecast 实现 train/vali/test 三个核心方法。配合 EarlyStopping 和学习率调度工具。Sundial 跳过训练直接测试。
-
-## 实现
-- **状态**：✅已完成
+- **实现状态**：✅已完成
 - **核心文件**：
-  - `forecast/exp/exp_basic.py:6` — Exp_Basic 基类，model_dict 管理三个模型，_acquire_device() 支持 CUDA/MPS/CPU
-  - `forecast/exp/exp_long_term_forecasting.py:14` — Exp_Long_Term_Forecast
-    - `train()`:50 — Adam + MSELoss，每 epoch 遍历 train_loader，每 100 iter 打印 loss，epoch 末计算 vali/test loss，EarlyStopping 检查，LR 调度，最终加载 best model
-    - `vali()`:28 — eval + no_grad，计算 MSE 损失
-    - `test()`:112 — 加载 checkpoint（或 Sundial 直接推理），收集 preds/trues，计算 MAE/MSE/RMSE/MAPE/MSPE，保存 npy 到 result_path
-  - `forecast/utils/tools.py:5` — EarlyStopping（patience 次无改善停止 + 保存 checkpoint），adjust_learning_rate（type1: 每 epoch 减半; type2: 手动阶梯）
-- **实现方式**：
-  - **features='MS'** 时 f_dim=-1，仅取最后一个变量计算损失
-  - **Sundial 分支**：test() 中 `model.predict()` 返回 numpy，其他模型 `model()` 返回 tensor
-  - **结果保存**：`{result_path}/{setting}/` 下 pred.npy, true.npy, metrics.npy
-  - **checkpoint**：`{checkpoints}/{setting}/checkpoint.pth`
-- **设计决策**：ADR-003（Sundial 不训练）
+  - `forecast/exp/exp_basic.py:6` — Exp_Basic 基类（model_dict、设备管理）
+  - `forecast/exp/exp_long_term_forecasting.py:14` — Exp_Long_Term_Forecast（train/vali/test）
+  - `forecast/utils/tools.py:5` — EarlyStopping + adjust_learning_rate
+- **功能描述**：训练/验证/测试完整实验循环。train(): Adam+MSELoss，epoch 循环，EarlyStopping(patience=3)，LR 调度(每 epoch 减半)，保存 best checkpoint。test(): 加载 checkpoint（Sundial 直接 predict），计算 MAE/MSE 等指标，保存 npy。Sundial 跳过训练。
+- **测试方法**：
+  ```bash
+  python -m forecast.run --model DLinear --data ETTh1 --pred_len 96 --is_training 1 --train_epochs 3
+  ls ./checkpoints/DLinear_ETTh1_M_sl96_pl96/checkpoint.pth
+  ls ./forecast/results/DLinear_ETTh1_M_sl96_pl96/
+  ```
 
-## 测试
-### 测试方法
-```bash
-# 完整训练+测试流程
-python -m forecast.run --model DLinear --data ETTh1 --pred_len 96 --is_training 1 --train_epochs 3
+## 变化
 
-# 验证产出文件
-ls ./checkpoints/DLinear_ETTh1_M_sl96_pl96/checkpoint.pth
-ls ./forecast/results/DLinear_ETTh1_M_sl96_pl96/{pred,true,metrics}.npy
-```
+### [实现] 2026-03-22 17:30 — 初始实现 (`90d939e`)
 
-### 测试结果
-| 日期 (UTC+8) | 方法 | 结果 | 备注 |
-|--------------|------|------|------|
-| （暂无记录） | | | |
+<details><summary>详情</summary>
 
-## 问题跟踪
-### 已知问题
-| 问题 | 优先级 | 发现日期 | 状态 |
-|------|--------|----------|------|
-| 结果未汇总对比（每次实验单独 npy，无统一对比表） | P2 | 2026-03-22 | 📋待处理 |
+**计划**：实现标准训练/验证/测试循环，支持三个模型统一调度，Sundial 特殊路径。
+**代码修改**：
+- 新增 `exp/exp_basic.py`：Exp_Basic 基类，model_dict 管理三模型，CUDA/MPS/CPU 设备
+- 新增 `exp/exp_long_term_forecasting.py`：train() 完整训练循环 + vali() + test()（含 Sundial 分支）
+- 新增 `utils/tools.py`：EarlyStopping + adjust_learning_rate (type1/type2)
 
-### 解决记录
-| 问题 | 解决方案 | 解决日期 | 验证 |
-|------|----------|----------|------|
+**测试**：
+| 方法 | 结果 | 备注 |
+|------|------|------|
+| （暂无） | ⚪未测试 | |
 
-## 时间线
-| 时间 (UTC+8) | 事件 | commit |
-|--------------|------|--------|
-| 2026-03-22 | 初始实现（实验基类 + 训练/测试循环 + 工具） | prediction-fusion 分支 |
+**已知问题**：
+- 实验结果未汇总对比（每次单独 npy，无统一对比表）— P2
+
+</details>

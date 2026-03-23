@@ -9,7 +9,7 @@ Python 3.13 / PyTorch / HuggingFace Transformers (Sundial)
 开始工作前阅读相关文档了解当前状态：
 - `record/project/index.md` — 功能索引总览（状态、时间、维护情况）
 - `record/project/features/` — 各功能详情文件（实现/测试/问题/时间线）
-- `record/project/decisions.md` — 设计决策 (ADR)
+- `record/project/workflow.md` — 开发工作流方法论
 
 ### Skill 使用
 - `/catch-up` — 初始化文档或追赶落后的文档状态（扫描代码+git→生成/更新所有文档）
@@ -45,3 +45,5 @@ Python 3.13 / PyTorch / HuggingFace Transformers (Sundial)
 3. Sundial 是 zero-shot 模型，不需要训练（`--is_training 0`）
 4. checkpoints/ 在 .gitignore 中，不提交
 5. ETT_data/ 下的 CSV 文件是数据集，不修改
+6. **对话结束时，如有文件变更（代码或文档），执行 `/update-docs` 更新文档后 commit。commit message 根据实际变更准确描述。**
+7. **用户粘贴的测试结果同样需要记录到对应功能文档中**

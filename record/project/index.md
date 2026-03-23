@@ -1,6 +1,6 @@
 # xiaoyi-query (prediction-fusion) 功能索引
 
-> 最后更新：2026-03-22 (UTC+8)
+> 最后更新：2026-03-23 (UTC+8)
 
 ## 架构概览
 
