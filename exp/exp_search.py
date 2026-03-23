@@ -1,21 +1,33 @@
 """
 实验控制流模块
 负责加载数据、初始化模型、执行测试、计算指标、保存结果
+支持 PatternSearch / LSHSearch / SAXSearch 三种模型
 """
 
 import os
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from data_provider.data_loader import get_data, get_X_Y_from_dataset, Dataset_ETT_hour
 from models.PatternSearch import PatternSearch
-from utils.metrics import calculate_all_metrics, print_metrics, save_metrics_to_file
+from models.LSHSearch import LSHSearch
+from models.SAXSearch import SAXSearch
+from utils.metrics import calculate_all_metrics, print_metrics
+
+
+# 可用模型注册表
+MODEL_REGISTRY = {
+    'PatternSearch': PatternSearch,
+    'LSHSearch': LSHSearch,
+    'SAXSearch': SAXSearch,
+}
 
 
 class Exp_Search:
     """
-    PatternSearch 基线模型实验类
+    时序预测基线模型实验类
     封装完整的数据加载、模型训练/预测、评估流程
+    支持三种模型：PatternSearch, LSHSearch, SAXSearch
     """
 
     def __init__(self, args):
@@ -26,28 +38,73 @@ class Exp_Search:
                 - data_path: 数据文件名
                 - seq_len: 输入序列长度
                 - pred_len: 预测序列长度
-                - top_k: 近邻数量
+                - model_name: 模型名称 ('PatternSearch', 'LSHSearch', 'SAXSearch')
                 - features: 'M' 或 'S'
                 - target: 目标列名
-                - weighted: 是否使用逆距离加权
+                - output_dir: 输出目录
+                - weighted: 是否使用逆距离加权 (PatternSearch)
+                - top_k: 近邻数量
+                - n_hash_funcs: LSH 哈希函数数量
+                - n_tables: LSH 哈希表数量
+                - hamming_radius: LSH 汉明距离容忍
+                - word_size: SAX 词大小
+                - alphabet_size: SAX 字母表大小
+                - epsilon_threshold: SAX 编辑距离容忍
         """
         self.args = args
         self.model = None
+        self.model_name = getattr(args, 'model_name', 'PatternSearch')
         self.train_set = None
         self.val_set = None
         self.test_set = None
 
         # 创建输出目录
-        self.output_dir = './results'
+        self.output_dir = getattr(args, 'output_dir', './results')
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _build_model(self):
-        """初始化 PatternSearch 模型"""
-        self.model = PatternSearch(
-            k=self.args.top_k,
-            weighted=self.args.weighted,
-            algorithm='kd_tree'
-        )
+        """根据 model_name 初始化对应的模型"""
+        if self.model_name not in MODEL_REGISTRY:
+            raise ValueError(f"Unknown model: {self.model_name}. "
+                           f"Available: {list(MODEL_REGISTRY.keys())}")
+
+        print(f"\n{'=' * 60}")
+        print(f"Initializing Model: {self.model_name}")
+        print('=' * 60)
+
+        if self.model_name == 'PatternSearch':
+            self.model = PatternSearch(
+                k=self.args.top_k,
+                weighted=getattr(self.args, 'weighted', True),
+                algorithm='kd_tree'
+            )
+            print(f"  - k (top_k): {self.args.top_k}")
+            print(f"  - weighted: {getattr(self.args, 'weighted', True)}")
+
+        elif self.model_name == 'LSHSearch':
+            self.model = LSHSearch(
+                n_hash_funcs=getattr(self.args, 'n_hash_funcs', 16),
+                n_tables=getattr(self.args, 'n_tables', 4),
+                hamming_radius=getattr(self.args, 'hamming_radius', 2),
+                fallback_strategy='global_mean',
+                random_state=42
+            )
+            print(f"  - n_hash_funcs: {getattr(self.args, 'n_hash_funcs', 16)}")
+            print(f"  - n_tables: {getattr(self.args, 'n_tables', 4)}")
+            print(f"  - hamming_radius: {getattr(self.args, 'hamming_radius', 2)}")
+
+        elif self.model_name == 'SAXSearch':
+            self.model = SAXSearch(
+                word_size=getattr(self.args, 'word_size', 8),
+                alphabet_size=getattr(self.args, 'alphabet_size', 8),
+                epsilon_threshold=getattr(self.args, 'epsilon_threshold', 1.0),
+                fallback_strategy='global_mean',
+                random_state=42
+            )
+            print(f"  - word_size: {getattr(self.args, 'word_size', 8)}")
+            print(f"  - alphabet_size: {getattr(self.args, 'alphabet_size', 8)}")
+            print(f"  - epsilon_threshold: {getattr(self.args, 'epsilon_threshold', 1.0)}")
+
         return self.model
 
     def _load_data(self):
@@ -105,8 +162,9 @@ class Exp_Search:
 
         # 在训练集上构建记忆索引
         print("\n" + "-" * 60)
-        print(f"Fitting PatternSearch model (k={self.args.top_k}, weighted={self.args.weighted})...")
+        print(f"Fitting {self.model_name} model...")
         print("-" * 60)
+
         self.model.fit(X_train, Y_train)
         print(f"Model Info: {self.model}")
         print("Memory index built successfully!")
@@ -193,6 +251,21 @@ class Exp_Search:
 
         return metrics
 
+    def _get_exp_id(self) -> str:
+        """生成实验唯一标识符"""
+        dataset_name = self.args.data_path.replace('.csv', '')
+
+        if self.model_name == 'PatternSearch':
+            return f"{dataset_name}_seq{self.args.seq_len}_pred{self.args.pred_len}_k{self.args.top_k}"
+        elif self.model_name == 'LSHSearch':
+            n_hash = getattr(self.args, 'n_hash_funcs', 16)
+            n_tables = getattr(self.args, 'n_tables', 4)
+            return f"{dataset_name}_seq{self.args.seq_len}_pred{self.args.pred_len}_lsh_h{n_hash}_t{n_tables}"
+        else:  # SAXSearch
+            word_size = getattr(self.args, 'word_size', 8)
+            alpha = getattr(self.args, 'alphabet_size', 8)
+            return f"{dataset_name}_seq{self.args.seq_len}_pred{self.args.pred_len}_sax_w{word_size}_a{alpha}"
+
     def _save_results(self, preds: np.ndarray, trues: np.ndarray, metrics: dict):
         """
         保存预测结果和指标
@@ -203,8 +276,7 @@ class Exp_Search:
             metrics: 评估指标
         """
         # 生成文件名标识
-        dataset_name = self.args.data_path.replace('.csv', '')
-        exp_id = f"{dataset_name}_seq{self.args.seq_len}_pred{self.args.pred_len}_k{self.args.top_k}"
+        exp_id = self._get_exp_id()
 
         # 保存预测结果为 .npy 文件
         preds_path = os.path.join(self.output_dir, f"{exp_id}_preds.npy")
@@ -222,11 +294,11 @@ class Exp_Search:
         # 写入详细信息
         with open(result_path, 'a') as f:
             f.write("\n" + "=" * 60 + "\n")
-            f.write(f"Experiment: PatternSearch Baseline\n")
+            f.write(f"Model: {self.model_name}\n")
             f.write(f"Dataset: {self.args.data_path}\n")
             f.write(f"Features: {self.args.features}\n")
             f.write(f"seq_len: {self.args.seq_len}, pred_len: {self.args.pred_len}\n")
-            f.write(f"top_k: {self.args.top_k}, weighted: {self.args.weighted}\n")
+            self._write_model_params(f)
             f.write("-" * 60 + "\n")
 
             for key, value in metrics.items():
@@ -237,11 +309,37 @@ class Exp_Search:
 
         print("\nResults saved successfully!")
 
+    def _write_model_params(self, f):
+        """写入模型特定参数"""
+        if self.model_name == 'PatternSearch':
+            f.write(f"top_k: {self.args.top_k}, weighted: {getattr(self.args, 'weighted', True)}\n")
+        elif self.model_name == 'LSHSearch':
+            f.write(f"n_hash_funcs: {getattr(self.args, 'n_hash_funcs', 16)}, "
+                   f"n_tables: {getattr(self.args, 'n_tables', 4)}, "
+                   f"hamming_radius: {getattr(self.args, 'hamming_radius', 2)}\n")
+        else:  # SAXSearch
+            f.write(f"word_size: {getattr(self.args, 'word_size', 8)}, "
+                   f"alphabet_size: {getattr(self.args, 'alphabet_size', 8)}, "
+                   f"epsilon_threshold: {getattr(self.args, 'epsilon_threshold', 1.0)}\n")
+
     def get_model_info(self) -> dict:
         """获取模型信息"""
         if self.model is None:
             return {}
-        return self.model.get_params()
+        info = self.model.get_params()
+        info['model_name'] = self.model_name
+        return info
+
+    def get_predictions(self) -> tuple:
+        """获取预测结果和真实值（用于后续分析）"""
+        if self.model is None:
+            raise RuntimeError("Model not fitted. Please call fit() first.")
+
+        preds, trues = self.predict()
+        preds_original = self.test_set.inverse_transform(preds)
+        trues_original = self.test_set.inverse_transform(trues)
+
+        return preds_original, trues_original
 
 
 def run_experiment(args):
@@ -257,3 +355,8 @@ def run_experiment(args):
     exp = Exp_Search(args)
     metrics = exp.test(save_results=True)
     return metrics
+
+
+def list_available_models():
+    """列出所有可用的模型"""
+    return list(MODEL_REGISTRY.keys())

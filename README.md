@@ -1,102 +1,103 @@
-# PatternSearch: Memory-based Time Series Forecasting
+# 时序预测基线模型
 
-A minimalist baseline model for time series forecasting based on memory retrieval and k-NN/KD-Tree search, without any deep learning frameworks.
+基于记忆检索的时序预测，包含三种算法：**PatternSearch** (KNN)、**LSHSearch** (局部敏感哈希)、**SAXSearch** (符号聚合近似)。
 
-## Overview
+## 安装
 
-This project implements a simple yet effective baseline for time series prediction by:
-1. Storing historical input-output pairs as a memory bank
-2. Using k-NN (KD-Tree) to find similar patterns
-3. Fusing predictions through weighted averaging
+```bash
+pip install numpy pandas scikit-learn scipy rich streamlit plotly
+```
 
-## Project Structure
+## 使用方法
+
+### 统一入口 `run.py`
+
+```bash
+# 基本用法
+python run.py --model PatternSearch                          # 单模型
+python run.py --model all                                     # 所有模型
+python run.py --model PatternSearch,LSHSearch                 # 指定模型
+
+# 参数网格
+python run.py --model all --seq_len 96 192 --pred_len 24 48 96
+
+# 并行 + 仪表盘
+python run.py --model all --parallel --dashboard
+
+# 仅启动仪表盘
+python run.py --skip_run --dashboard
+```
+
+### 参数说明
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | PatternSearch | 模型: PatternSearch / LSHSearch / SAXSearch / all |
+| `--seq_len` | 96 | 输入序列长度 |
+| `--pred_len` | 48 | 预测序列长度 |
+| `--features` | M | M=多变量, S=单变量 |
+| `--parallel` | False | 启用并行计算 |
+| `--dashboard` | False | 运行后启动可视化 |
+
+### 模型特定参数
+
+```bash
+# PatternSearch
+python run.py --model PatternSearch --top_k 5 --weighted True
+
+# LSHSearch
+python run.py --model LSHSearch --n_hash_funcs 16 --n_tables 4
+
+# SAXSearch
+python run.py --model SAXSearch --word_size 8 --alphabet_size 8
+```
+
+## 项目结构
 
 ```
-xiaoyi-query/
-├── data_provider/
-│   └── data_loader.py    # ETT data loading, normalization, sliding window
+.
+├── run.py                 # 统一入口
 ├── models/
-│   └── PatternSearch.py  # k-NN based memory retrieval model
-├── exp/
-│   └── exp_search.py     # Experiment control flow
-├── utils/
-│   └── metrics.py        # MAE, MSE, RMSE, MAPE, MSPE metrics
-├── ETT_data/             # ETT datasets
-└── run.py                # Command-line entry point
+│   ├── PatternSearch.py   # KD-Tree KNN
+│   ├── LSHSearch.py      # 局部敏感哈希
+│   └── SAXSearch.py      # 符号聚合近似
+├── data_provider/
+│   └── data_loader.py     # 数据加载
+├── dashboard/
+│   └── app.py            # Streamlit 可视化
+└── results/               # 实验输出
 ```
 
-## Installation
+## 算法对比
 
-```bash
-pip install numpy pandas scikit-learn torch
+| 模型 | 搜索精度 | 检索速度 | 特点 |
+|------|---------|---------|------|
+| PatternSearch | 精确 | O(log n) | 欧氏距离，逆距离加权 |
+| LSHSearch | 近似 | O(1) | 随机投影，哈希碰撞 |
+| SAXSearch | 模糊 | O(n) | PAA降维，编辑距离 |
+
+## 输出
+
+- `results/experiment_log.json` - 实验日志
+- `results/*_preds.npy` - 预测结果
+- `results/*_trues.npy` - 真实值
+
+运行 `--dashboard` 后访问 `http://localhost:8501` 查看可视化。
+
+## 核心模块复用
+
+```python
+from run import run_single_experiment, ExperimentRunner
+
+# 单独运行一个实验
+result = run_single_experiment({
+    'model_name': 'PatternSearch',
+    'seq_len': 96,
+    'pred_len': 48,
+    'top_k': 5
+})
+
+# 批量运行
+runner = ExperimentRunner(args)
+runner.run()
 ```
-
-## Usage
-
-### Basic Command
-
-```bash
-# Single variable prediction on ETTm1
-python run.py --data_path ETTm1.csv --features S
-
-# Multi-variable prediction on ETTh1
-python run.py --data_path ETTh1.csv --features M
-```
-
-### Command-line Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--data_path` | ETTm1.csv | Dataset filename |
-| `--features` | S | M=multivariate, S=univariate |
-| `--seq_len` | 96 | Input sequence length |
-| `--pred_len` | 48 | Prediction sequence length |
-| `--top_k` | 5 | Number of nearest neighbors |
-| `--weighted` | True | Use inverse-distance weighting |
-| `--target` | OT | Target column (for univariate mode) |
-| `--root_path` | ./ETT_data | Data root directory |
-| `--output_dir` | ./results | Output directory |
-
-### Examples
-
-```bash
-# Different sequence lengths
-python run.py --data_path ETTm1.csv --seq_len 168 --pred_len 96
-
-# Different k values
-python run.py --data_path ETTh1.csv --top_k 10
-
-# Simple average (no weighting)
-python run.py --data_path ETTm1.csv --no_weighted
-```
-
-## Output
-
-Results are saved to `./results/`:
-- `*_preds.npy`: Predicted values
-- `*_trues.npy`: Ground truth values
-- `result.txt`: Evaluation metrics
-
-## Datasets
-
-The project uses ETT (Electricity Transformer Temperature) datasets:
-- **ETTh1/ETTh2**: Hourly sampling, 7 features
-- **ETTm1/ETTm2**: 15-minute sampling, 7 features
-
-Data split: Train 70% / Val 10% / Test 20%
-
-## Model Details
-
-### PatternSearch Algorithm
-
-```
-1. Memory Bank: Store all (X_train, Y_train) pairs
-2. Query: For each test sample x, find top-k similar sequences from memory
-3. Predict: Fuse corresponding Y values via weighted averaging
-
-Prediction = Σ(w_i * Y_i) / Σ(w_i), where w_i = 1/dist(x, X_i)
-```
-
-## License
-
-MIT
