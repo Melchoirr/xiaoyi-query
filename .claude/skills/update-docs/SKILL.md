@@ -1,85 +1,41 @@
 ---
 name: update-docs
-description: 对话结束时更新文档并提交。覆盖 Plan/Execute/Test 三个场景。维护 index.md + features/*.md，一条变化记录对应一次 commit。
+description: "MUST use after ANY of: (1) creating or updating a plan, (2) modifying code, (3) running tests or receiving test results from user, (4) discovering or fixing bugs, (5) any conversation end where files were changed. Proactively invoke — do not wait for user to ask. Maintains record/project/index.md + features/*.md with commit-level change tracking."
 ---
 
-# 文档更新流程
+# update-docs
 
-## 触发场景
-- **Plan**：产出实施计划后
-- **Execute**：代码修改完成后
-- **Test**：运行测试后（包括用户粘贴的测试结果）
-- **任何对话结束时有文件变更**
+## 流程
 
-## 执行步骤
+1. **识别涉及的功能** — 读 `record/project/index.md` 功能清单表，按核心文件列匹配变更文件。无匹配时：同目录新文件→扩展现有功能；全新模块→新建 feature 文件；配置文件→跳过。
 
-### 1. 识别涉及的功能
-- `git diff --stat` 或 `git status` 查看变更文件
-- 读 `record/project/index.md` 功能清单表，根据核心文件列匹配变更文件
-- 一个文件可能关联多个功能，一个功能可能涉及多个文件
-- 匹配不到时：判断是扩展现有功能、新建功能、还是辅助文件
+2. **更新 features/fXX-*.md** — 两个部分：
 
-### 2. 更新功能详情文件
+   **「状态」节**：刷新为最新（实现状态、核心文件、功能描述、测试方法）。
 
-读取对应 `features/fXX-*.md`，更新两个部分：
+   **「变化」节**：在顶部追加条目（最新在上）：
+   ```markdown
+   ### [tag] YYYY-MM-DD HH:MM — 标题 (`commit_hash`)
+   <details><summary>详情</summary>
 
-**「状态」节**（刷新为最新）：
-- 实现状态：📋计划中 → 🔧进行中 → ✅已完成
-- 核心文件列表：如有新文件，补充
-- 功能描述：如实现方式有变，更新
-- 测试方法：如有新的测试命令，补充
+   **计划**：做什么
+   **代码修改**：改了什么
+   **测试**：
+   | 方法 | 结果 | 备注 |
+   |------|------|------|
 
-**「变化」节**（在顶部追加新条目）：
+   </details>
+   ```
+   Tag: `[计划]` `[实现]` `[修改]` `[修复]` `[重构]` `[弃用]` `[启用]`
 
-```markdown
-### [tag] YYYY-MM-DD HH:MM — 变更标题 (`commit_hash`)
+   跨功能测试：在每个涉及的功能文件中都记录。
 
-<details><summary>详情</summary>
+3. **增量更新 index.md** — 只改涉及的行（最后变更、状态列）。新功能追加行。全局问题汇总从 features/ 聚合（加链接）。
 
-**计划**：这次变更要做什么（概括 + 详情）
-**代码修改**：具体修改了哪些文件/函数/逻辑
-**测试**：
-| 方法 | 结果 | 备注 |
-|------|------|------|
-| 测试命令或描述 | ✅/❌ | 说明 |
+4. **Commit** — `git add` 变更文件 + 文档，commit message 准确描述变更。commit 后补 hash 到变化条目。
 
-</details>
-```
-
-Tag 选择：`[计划]` `[实现]` `[修改]` `[修复]` `[重构]` `[弃用]` `[启用]`
-
-**跨功能测试**：如果一次测试涉及多个功能，在每个功能文件中都记录相同的测试结果。
-
-### 3. 增量更新 index.md
-
-只修改涉及的行，不重新生成整个表：
-- 更新「最后变更」列
-- 更新「状态」列（如状态发生变化）
-- 如有新功能，追加新行
-- 全局问题汇总表从 features/*.md 的已知问题中聚合（加链接），不单独编写
-
-### 4. Commit
-
-```bash
-git add record/ [其他变更文件]
-git commit -m "准确描述本次变更的 commit message"
-```
-
-commit message 根据本次变更内容生成，准确描述做了什么。commit 后在变化条目中补充 commit hash。
-
-## 如何定位变更文件对应的功能
-
-通过 index.md 的「核心文件」列动态匹配，不依赖硬编码映射：
-1. 读 index.md 功能清单表
-2. 对每个变更文件，查找核心文件列中包含该文件或其所在目录的功能行
-3. 无匹配时：
-   - 同目录下的新文件 → 扩展现有功能的核心文件列表
-   - 全新模块 → 新建 feature 文件 + 更新 index.md
-   - 配置/CI 等辅助文件 → 不需要对应功能
-
-## 格式规范
-- 时间戳：`YYYY-MM-DD HH:MM` (UTC+8)
-- 功能 ID：FXX 递增
-- 文件名：`fXX-kebab-case.md`
-- 变化条目按时间倒序（最新在上）
-- 用 `<details><summary>` 折叠详情
+## 约定
+- 时间：UTC+8，`YYYY-MM-DD HH:MM`
+- ID：FXX 递增，文件名 `fXX-kebab-case.md`
+- 状态：✅已完成 / 🔧进行中 / 📋计划中 / ❌已废弃
+- 折叠：`<details><summary>` 包裹详情
