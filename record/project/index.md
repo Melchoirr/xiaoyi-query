@@ -44,11 +44,13 @@ CLI 入口 (run.py) + 批量脚本 (run_all.sh)
 
 ## 全局问题汇总
 
-| 问题 | 优先级 | 关联功能 | 状态 |
-|------|--------|----------|------|
+> 以下汇总自各功能详情文件的已知问题，更新时从 features/*.md 中聚合，不单独维护。
+
+| 问题 | 优先级 | 来源 | 状态 |
+|------|--------|------|------|
 | 测试覆盖为零（无 tests/ 目录） | P1 | 全局 | 📋待处理 |
 | 无 pyproject.toml 或 requirements.txt 依赖声明 | P2 | 全局 | 📋待处理 |
-| MAPE/MSPE 在 true=0 时除零 | P2 | F04 | 📋待处理 |
-| Sundial 逐样本推理效率低 | P2 | F01 | 📋待处理 |
-| 实验结果无汇总对比表 | P2 | F03 | 📋待处理 |
-| Sundial 首次需下载 HF 模型 | P3 | F01 | ⚠️设计如此 |
+| MAPE/MSPE 在 true=0 时除零 | P2 | [F04](features/f04-metrics.md) | 📋待处理 |
+| Sundial 逐样本推理效率低 | P2 | [F01](features/f01-prediction-models.md) | 📋待处理 |
+| 实验结果无汇总对比表 | P2 | [F03](features/f03-experiment-engine.md) | 📋待处理 |
+| Sundial 首次需下载 HF 模型 | P3 | [F01](features/f01-prediction-models.md) | ⚠️设计如此 |
