@@ -36,6 +36,9 @@ python run.py --model all --seq_len 96 192 --pred_len 24 48 96
 # 并行 + 仪表盘（自动内存保护，内存 > 85% 时回退串行）
 python run.py --model all --parallel --dashboard
 
+# GPU 加速（需安装 CUDA 版 PyTorch；PatternSearch 用 torch.cdist+topk，LSH 批量投影）
+python run.py --model PatternSearch --use_gpu --dashboard
+
 # 仅启动仪表盘
 python run.py --skip_run --dashboard
 ```
@@ -50,6 +53,9 @@ python run.py --skip_run --dashboard
 | `--features` | M | M=多变量, S=单变量（内存敏感场景建议 S） |
 | `--parallel` | False | 启用并行计算（内存保护自动降级） |
 | `--n_workers` | 4 | 并行 worker 数（最大 4） |
+| `--use_gpu` | False | `torch.cuda` 可用时，推理使用 GPU（PatternSearch/LSH/SAX） |
+
+说明：`--parallel` 与 `--use_gpu` 同时开启时，多进程可能争用同一块 GPU，建议大实验单进程 `--use_gpu` 或减小 `n_workers`。
 | `--dashboard` | False | 运行后启动可视化 |
 
 ### 模型特定参数

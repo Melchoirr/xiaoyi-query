@@ -106,6 +106,14 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         for param in MODEL_REGISTRY[model_name]['params']:
             model_params[param] = config.get(param, _get_default(param))
 
+        import torch
+        use_gpu = bool(config.get('use_gpu', False))
+        device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+        if use_gpu and device == 'cpu':
+            logger.warning(f"[{model_name}] 请求 GPU 但 torch.cuda 不可用，已回退 CPU")
+        model_params['device'] = device
+        logger.info(f"[{model_name}] 计算设备: {device}")
+
         # 创建参数对象
         class Args:
             pass
@@ -148,41 +156,29 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         gc.collect()
 
         # ─────────────────────────────────────────────────
-        # Bug 修复 (v2.1): 不再无条件 [:, :, 0]
-        # 保留 Y_pred / Y_test 的原始维度
+        # 反归一化：按“最安全模板”整段替换（避免局部变量作用域/分支风险）
         # ─────────────────────────────────────────────────
-        n_features = Y_test.shape[2] if Y_test.ndim == 3 else 1
+        n_features = Y_test.shape[-1] if Y_test.ndim == 3 else 1
+        n_test = Y_pred.shape[0]
+        p_len = Y_pred.shape[1]
 
-        # inverse_transform 入口：统一 2D 处理
-        # Y_pred / Y_test shape: (n_test, pred_len) 或 (n_test, pred_len, n_features)
-        if Y_pred.ndim == 3:
-            n_test, p_len, n_feat = Y_pred.shape
-            Y_pred_2d = Y_pred.reshape(n_test, p_len * n_feat)
-        else:
-            n_test, p_len = Y_pred.shape
-            n_feat = 1
-            Y_pred_2d = Y_pred
-
-        if Y_test.ndim == 3:
-            n_test_y, p_len_y, n_feat_y = Y_test.shape
-            Y_test_2d = Y_test.reshape(n_test_y, p_len_y * n_feat_y)
-        else:
-            Y_test_2d = Y_test
+        # 安全展平 (样本数 * 预测长度, 特征数)
+        Y_pred_flat = Y_pred.reshape(-1, n_features)
+        Y_test_flat = Y_test.reshape(-1, n_features)
 
         # 反归一化
-        Y_pred_orig = test_set.inverse_transform(Y_pred_2d)
-        Y_test_orig = test_set.inverse_transform(Y_test_2d)
+        Y_pred_orig = test_set.inverse_transform(Y_pred_flat)
+        Y_test_orig = test_set.inverse_transform(Y_test_flat)
 
-        # 恢复原始形状（2D 或 3D）
-        if n_feat > 1:
-            Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_feat)
-            Y_test_orig = Y_test_orig.reshape(n_test_y, p_len_y, n_feat_y)
+        # 安全恢复维度
+        if n_features > 1:
+            Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_features)
+            Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_features)
         else:
             Y_pred_orig = Y_pred_orig.reshape(n_test, p_len)
-            Y_test_orig = Y_test_orig.reshape(n_test_y, p_len_y)
+            Y_test_orig = Y_test_orig.reshape(n_test, p_len)
 
-        # 释放中间对象
-        del test_set, Y_pred_2d, Y_test_2d, Y_pred, Y_test
+        del test_set, Y_pred_flat, Y_test_flat, Y_pred, Y_test
         gc.collect()
 
         # 计算指标
@@ -350,6 +346,7 @@ class ExperimentRunner:
             cfg['data_path'] = self.args.data_path
             cfg['features'] = self.args.features
             cfg['target'] = self.args.target
+            cfg['use_gpu'] = getattr(self.args, 'use_gpu', False)
 
         return configs
 
@@ -527,16 +524,15 @@ def launch_dashboard():
 
     cmd = [
         sys.executable, '-m', 'streamlit', 'run', dashboard_path,
-        '--server.port', '8501', '--server.headless', 'true'
+        '--server.port', '8501', '--server.headless', 'true',
+        '--server.address', '0.0.0.0'  # 允许外部网络(Ingress/NodePort)访问
     ]
-
-    logger.info(f"启动仪表盘: http://localhost:8501")
-
     try:
-        subprocess.Popen(cmd, cwd=PROJECT_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(cmd, cwd=PROJECT_ROOT)
+        logger.info("仪表盘进程已启动: http://localhost:8501")
         time.sleep(2)
         webbrowser.open('http://localhost:8501')
-        logger.info("仪表盘已在浏览器中打开")
+        logger.info("已在默认浏览器中打开仪表盘（若失败请手动访问上述地址）")
     except Exception as e:
         logger.error(f"启动仪表盘失败: {e}")
         logger.info(f"请手动运行: {' '.join(cmd)}")
@@ -586,6 +582,8 @@ def parse_args():
                        help='启用并行计算（内存 > 85%% 时自动降级）')
     parser.add_argument('--n_workers', type=int, default=4,
                        help='并行进程数（最大 4）')
+    parser.add_argument('--use_gpu', action='store_true',
+                       help='若 torch.cuda 可用则在 GPU 上做张量距离/投影（PatternSearch/LSH/SAX）')
 
     return parser.parse_args()
 

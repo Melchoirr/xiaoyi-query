@@ -284,7 +284,7 @@ def render_sidebar() -> Dict[str, Any]:
     log_data = load_experiment_log(output_dir)
 
     if log_data is None:
-        st.sidebar.warning("⚠️ 未找到实验日志文件，请先运行 tools/experiment_runner.py")
+        st.sidebar.warning("⚠️ 未找到实验日志文件，请先运行: python run.py --model all")
         return {'output_dir': output_dir, 'log_data': None}
 
     # 加载成功
@@ -512,15 +512,26 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
     st.plotly_chart(fig_mape, use_container_width=True)
 
 
-def render_waveform_comparison(config: Dict[str, Any]):
+def render_waveform_comparison(
+    config: Dict[str, Any],
+    experiments: Optional[List[Dict[str, Any]]] = None
+):
     """
     渲染微观波形对比部分
 
     Args:
-        config: 包含用户选择的配置
+        config: 包含用户选择的配置（须含 experiments 或可从 log_data 取）
     """
     st.markdown("---")
     st.markdown("## 🔍 微观波形探查 (Case Study)")
+
+    # 与 render_sidebar 返回的键对齐；并允许调用方显式传入 experiments
+    if experiments is None:
+        experiments = config.get('experiments')
+    if experiments is None and config.get('log_data') is not None:
+        experiments = config['log_data'].get('experiments', [])
+    if experiments is None:
+        experiments = []
 
     model = config['selected_model']
     pred_len = config['selected_pred_len']
@@ -830,7 +841,7 @@ def main():
     log_data = config.get('log_data')
 
     if log_data is None:
-        st.warning("⚠️ 请先运行 `python tools/experiment_runner.py` 生成实验结果")
+        st.warning("⚠️ 请先运行 `python run.py --model all` 生成实验结果（或指定模型）")
         st.markdown("---")
         render_model_introduction()
         return
@@ -838,8 +849,8 @@ def main():
     # 渲染宏观指标对比
     render_metrics_comparison(log_data)
 
-    # 渲染微观波形对比
-    render_waveform_comparison(config)
+    # 渲染微观波形对比（显式传入 experiments，避免作用域/缺参导致 NameError）
+    render_waveform_comparison(config, experiments=log_data.get('experiments', []))
 
     # 渲染模型介绍
     render_model_introduction()
