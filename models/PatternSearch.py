@@ -4,6 +4,7 @@ PatternSearch: 基于记忆检索的时序预测基线模型
 """
 
 import numpy as np
+import gc
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -16,6 +17,8 @@ class PatternSearch:
     - 对每个测试样本，通过 k-NN 找到最相似的 K 个历史序列
     - 使用对应历史序列的真实输出 Y 进行加权融合预测
     """
+
+    DTYPE = np.float32   # 全局统一 float32
 
     def __init__(self, k: int = 5, weighted: bool = True, algorithm: str = 'kd_tree'):
         """
@@ -36,34 +39,28 @@ class PatternSearch:
         """
         构建记忆库，使用训练集的 (X, Y) 样本
 
-        Args:
-            X_train: 输入序列数组，shape: [n_samples, seq_len, n_features]
-                    或 shape: [n_samples, seq_len] (单变量)
-            Y_train: 目标序列数组，shape: [n_samples, pred_len, n_features]
-                    或 shape: [n_samples, pred_len] (单变量)
-
-        Note:
-            对于多变量情况，我们通常将多维序列展平成一维向量进行相似度计算
+        内存优化：
+        - 全部使用 float32
+        - 不再需要复制数据（直接 astype）
         """
         n_samples = X_train.shape[0]
 
-        # 展平输入序列：将 [n, seq_len, d] -> [n, seq_len * d]
+        # 展平 + 强制 float32
         if X_train.ndim == 3:
             self.seq_len = X_train.shape[1]
             self.n_features = X_train.shape[2]
-            self.memory_X = X_train.reshape(n_samples, -1)
+            self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
         else:
             self.seq_len = X_train.shape[1]
             self.n_features = 1
-            self.memory_X = X_train.reshape(n_samples, -1)
+            self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
 
-        # 保存展平后的目标序列
         if Y_train.ndim == 3:
             self.pred_len = Y_train.shape[1]
-            self.memory_Y = Y_train.reshape(n_samples, -1)
+            self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
         else:
             self.pred_len = Y_train.shape[1]
-            self.memory_Y = Y_train.reshape(n_samples, -1)
+            self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
 
         # 使用 sklearn NearestNeighbors 构建 KD-Tree 索引
         self.nn_model = NearestNeighbors(
@@ -81,14 +78,7 @@ class PatternSearch:
         """
         对测试样本进行预测
 
-        Args:
-            X_test: 测试输入序列，shape: [n_test_samples, seq_len, n_features]
-                   或 shape: [n_test_samples, seq_len] (单变量)
-            top_k: 覆盖默认的k值，可指定不同的k进行预测
-
-        Returns:
-            Y_pred: 预测输出，shape: [n_test_samples, pred_len, n_features]
-                   或 shape: [n_test_samples, pred_len] (单变量)
+        内存优化：所有中间变量使用 float32，结果保持 float32
         """
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
@@ -99,30 +89,30 @@ class PatternSearch:
         # 展平测试输入
         if X_test.ndim == 3:
             n_test = X_test.shape[0]
-            X_flat = X_test.reshape(n_test, -1)
+            X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
         else:
             n_test = X_test.shape[0]
-            X_flat = X_test.reshape(n_test, -1)
+            X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
 
         # 在记忆库中搜索 k 个最近邻
         distances, indices = self.nn_model.kneighbors(X_flat, n_neighbors=k)
 
-        # 检索对应的 Y 值
-        neighbor_Y = self.memory_Y[indices]  # shape: [n_test, k, pred_len * n_features]
+        # 检索对应的 Y 值（memory_Y 已是 float32）
+        neighbor_Y = self.memory_Y[indices]  # shape: [n_test, k, y_dim]
 
-        # 融合策略：计算预测
+        # 融合策略
         if self.weighted:
             # 逆距离加权平均
-            # 避免距离为0时权重无穷大，添加小常数
             distances = np.clip(distances, 1e-10, None)
-            weights = 1.0 / distances  # shape: [n_test, k]
-            weights = weights / weights.sum(axis=1, keepdims=True)  # 归一化
-
-            # 加权平均: [n_test, k, dim] -> [n_test, dim]
+            weights = 1.0 / distances
+            weights = weights / weights.sum(axis=1, keepdims=True)
             Y_pred = np.sum(neighbor_Y * weights[:, :, np.newaxis], axis=1)
         else:
-            # 简单平均
             Y_pred = np.mean(neighbor_Y, axis=1)
+
+        # 释放测试展平数组
+        del X_flat
+        gc.collect()
 
         # 恢复原始形状
         if self.n_features > 1:
@@ -133,17 +123,7 @@ class PatternSearch:
         return Y_pred
 
     def get_neighbors(self, X_query: np.ndarray, top_k: int = None):
-        """
-        获取查询样本的 k 个最近邻及其距离（用于分析）
-
-        Args:
-            X_query: 查询序列，shape: [n_queries, seq_len, n_features]
-            top_k: 近邻数量
-
-        Returns:
-            distances: 距离数组，shape: [n_queries, top_k]
-            indices: 索引数组，shape: [n_queries, top_k]
-        """
+        """获取查询样本的 k 个最近邻及其距离"""
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
 
@@ -152,10 +132,10 @@ class PatternSearch:
 
         if X_query.ndim == 3:
             n_queries = X_query.shape[0]
-            X_flat = X_query.reshape(n_queries, -1)
+            X_flat = X_query.reshape(n_queries, -1).astype(self.DTYPE)
         else:
             n_queries = X_query.shape[0]
-            X_flat = X_query.reshape(n_queries, -1)
+            X_flat = X_query.reshape(n_queries, -1).astype(self.DTYPE)
 
         distances, indices = self.nn_model.kneighbors(X_flat, n_neighbors=k)
         return distances, indices

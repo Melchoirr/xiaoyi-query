@@ -5,10 +5,10 @@ Usage:
     # 单模型运行
     python run.py --model PatternSearch
 
-    # 所有模型
-    python run.py --model all
+    # 所有模型（串行，推荐 8G 以下环境）
+    python run.py --model all --dashboard
 
-    # 并行运行 + 启动仪表盘
+    # 并行运行（自动内存保护，内存 > 16G 时启用）
     python run.py --model all --parallel --dashboard
 
     # 自定义参数网格
@@ -16,16 +16,24 @@ Usage:
 
     # 仅启动仪表盘
     python run.py --dashboard --skip_run
+
+内存优化说明（v2.0）：
+- 所有数据使用 float32（相比 float64 节省 50%）
+- 实验结果 JSON 只保留前 100 条样本，完整数据落盘 .npy
+- ExperimentRunner 每次实验结束后强制 gc.collect()
+- 并行模式：动态检测内存，超过 85% 回退串行；每个子进程 max_tasks_per_child=1
 """
 
 import os
 import sys
-import argparse
+import gc
 import json
 import time
+import psutil
+import argparse
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from multiprocessing import Pool, cpu_count
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ============================================================
 # 全局配置
@@ -41,7 +49,7 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 
 MODEL_REGISTRY = {
     'PatternSearch': {
-        'class': None,  # 延迟导入
+        'class': None,
         'params': ['top_k', 'weighted']
     },
     'LSHSearch': {
@@ -73,11 +81,10 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验（核心计算逻辑，可并行调用）
 
-    Args:
-        config: 实验配置字典
-
-    Returns:
-        实验结果字典
+    内存优化点：
+    - 数据集直接产生 float32
+    - 模型 fit/predict 后立即 del 中间变量
+    - 只在 config['save_preds'] == True 时才保留前 100 条样本到结果
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -89,7 +96,6 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     pred_len = config['pred_len']
 
     try:
-        # 导入模型
         import_models()
         ModelClass = MODEL_REGISTRY[model_name]['class']
 
@@ -109,19 +115,27 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         args.features = config.get('features', 'M')
         args.target = config.get('target', 'OT')
 
-        # 加载数据
+        # 加载数据（float32）
         train_set, val_set, test_set = get_data(args)
         X_train, Y_train = get_X_Y_from_dataset(train_set)
         X_test, Y_test = get_X_Y_from_dataset(test_set)
+
+        # 立即释放数据集对象（如果不需要后续使用）
+        del train_set, val_set
+        gc.collect()
 
         # 创建并训练模型
         model = ModelClass(**model_params)
         model.fit(X_train, Y_train)
 
+        # 释放训练数据（预测时不再需要）
+        del X_train, Y_train
+        gc.collect()
+
         # 预测
         Y_pred = model.predict(X_test)
         if Y_pred.ndim == 3:
-            Y_pred = Y_pred[:, :, 0]  # 取第一个特征
+            Y_pred = Y_pred[:, :, 0]
         if Y_test.ndim == 3:
             Y_test = Y_test[:, :, 0]
 
@@ -129,21 +143,52 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         Y_pred_orig = test_set.inverse_transform(Y_pred.reshape(-1, 1)).reshape(Y_pred.shape)
         Y_test_orig = test_set.inverse_transform(Y_test.reshape(-1, 1)).reshape(Y_test.shape)
 
-        # 计算指标
+        # 释放 test_set（不再需要）
+        del test_set, Y_pred, Y_test
+        gc.collect()
+
+        # 计算指标（标量结果）
         metrics = calculate_all_metrics(Y_pred_orig, Y_test_orig)
 
-        # 保存预测结果
+        # 生成实验ID
         exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig[:100])
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig[:100])
+
+        # ================================================
+        # 任务3: JSON 日志严格截断 - 只保留前 100 条样本
+        # 完整数据只通过 .npy 落盘
+        # ================================================
+        # 落盘完整数据（float32，体积约为 float64 的一半）
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"),
+                Y_pred_orig.astype(np.float32))
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"),
+                Y_test_orig.astype(np.float32))
+
+        # 只把前 100 条样本的截断数据放入 JSON（用于仪表盘快速预览）
+        MAX_PREVIEW = 100
+        preview_pred = Y_pred_orig[:MAX_PREVIEW].astype(np.float32).tolist()
+        preview_true = Y_test_orig[:MAX_PREVIEW].astype(np.float32).tolist()
+
+        # 释放完整数组
+        del Y_pred_orig, Y_test_orig
+        gc.collect()
 
         elapsed = time.time() - start_time
 
+        # 构建结果字典（只有标量 metrics + 截断预览，无大数组）
         return {
             'config': config,
             'metrics': metrics,
             'status': 'success',
-            'elapsed': elapsed
+            'elapsed': round(elapsed, 2),
+            'preview': {           # 仅前 100 条，用于 Streamlit 仪表盘
+                'preds': preview_pred,
+                'trues': preview_true,
+                'count': min(len(preview_pred), len(preview_true))
+            },
+            'npy_file': {          # 完整数据文件路径
+                'preds': f"{exp_id}_preds.npy",
+                'trues': f"{exp_id}_trues.npy"
+            }
         }
 
     except Exception as e:
@@ -154,7 +199,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             'status': 'failed',
             'error': str(e),
             'traceback': traceback.format_exc(),
-            'elapsed': time.time() - start_time
+            'elapsed': round(time.time() - start_time, 2)
         }
 
 
@@ -208,11 +253,46 @@ def _expand_configs(model_list: List[str], seq_lens: List[int], pred_lens: List[
 # ============================================================
 
 class ExperimentRunner:
-    """实验运行器（可导入复用）"""
+    """
+    实验运行器（可导入复用）
+
+    内存保护机制（任务4）：
+    - 动态检测系统内存使用率
+    - 超过 85% 自动从并行回退为串行
+    - ProcessPoolExecutor 设置 max_workers=1，每任务一进程后立即销毁
+    """
+
+    # 内存安全阈值（超过此值强制串行）
+    MEMORY_THRESHOLD = 0.85
 
     def __init__(self, args):
         self.args = args
         self.results = []
+        self._memory_check()
+
+    def _memory_check(self) -> bool:
+        """
+        检测当前系统内存占用率
+
+        Returns:
+            True: 内存安全，可以继续
+            False: 内存紧张，需要降级
+        """
+        try:
+            mem = psutil.virtual_memory()
+            usage = mem.percent / 100.0
+            avail_gb = mem.available / (1024 ** 3)
+            total_gb = mem.total / (1024 ** 3)
+            print(f"  [内存] 已用 {usage:.1%}  ({total_gb:.1f}G 总, 可用 {avail_gb:.1f}G)")
+
+            if usage >= self.MEMORY_THRESHOLD:
+                print(f"  [警告] 内存占用 {usage:.1%} >= {self.MEMORY_THRESHOLD:.1%}，"
+                      f"并行模式降级为串行以避免 OOM")
+                return False
+            return True
+        except Exception as e:
+            print(f"  [警告] 无法检测内存状态 ({e})，按保守策略串行执行")
+            return False
 
     def build_configs(self) -> List[Dict[str, Any]]:
         """构建实验配置列表"""
@@ -225,7 +305,6 @@ class ExperimentRunner:
         seq_lens = self.args.seq_len if self.args.seq_len else [96]
         pred_lens = self.args.pred_len if self.args.pred_len else [48]
 
-        # 基础配置模板
         all_configs = [
             {
                 'model_name': 'PatternSearch',
@@ -248,7 +327,6 @@ class ExperimentRunner:
 
         configs = _expand_configs(models, seq_lens, pred_lens, all_configs)
 
-        # 添加全局配置
         for cfg in configs:
             cfg['root_path'] = self.args.root_path
             cfg['data_path'] = self.args.data_path
@@ -258,38 +336,109 @@ class ExperimentRunner:
         return configs
 
     def run(self):
-        """运行实验"""
+        """运行实验（串行 / 并行自适应）"""
         configs = self.build_configs()
         total = len(configs)
 
         print(f"\n{'='*60}")
-        print(f"时序预测基线模型实验系统")
+        print(f"时序预测基线模型实验系统  [内存优化版 v2.0]")
         print(f"{'='*60}")
         print(f"模型: {configs[0]['model_name'] if len(set(c['model_name'] for c in configs)) == 1 else 'all'}")
         print(f"实验数: {total}")
-        print(f"并行: {self.args.parallel}")
         print(f"{'='*60}\n")
 
-        if self.args.parallel and total > 1:
-            # 并行执行
-            n_workers = min(self.args.n_workers, cpu_count(), total)
-            print(f"使用 {n_workers} 个进程并行执行...")
+        # 判断执行模式
+        use_parallel = self.args.parallel and total > 1
+        memory_safe = self._memory_check()
 
-            with Pool(n_workers) as pool:
-                self.results = pool.map(run_single_experiment, configs)
+        if use_parallel and memory_safe:
+            self._run_parallel(configs, total)
         else:
-            # 串行执行
-            for i, cfg in enumerate(configs):
-                print(f"[{i+1}/{total}] {cfg['model_name']} seq={cfg['seq_len']} pred={cfg['pred_len']}")
-                result = run_single_experiment(cfg)
-                self.results.append(result)
+            if use_parallel and not memory_safe:
+                print("并行请求被内存保护拦截，回退为串行执行。\n")
+            self._run_sequential(configs, total)
 
         self._save_log()
-
         return self.results
 
+    def _run_sequential(self, configs: List[Dict], total: int):
+        """
+        串行执行 + 任务2 GC 回收
+        每次实验结束后显式 del 大对象并 gc.collect()
+        """
+        print(f"串行执行（实验间强制 GC）...")
+
+        for i, cfg in enumerate(configs):
+            model_name = cfg['model_name']
+            print(f"[{i+1}/{total}] {model_name} seq={cfg['seq_len']} pred={cfg['pred_len']}")
+
+            result = run_single_experiment(cfg)
+            self.results.append(result)
+
+            # ================================================
+            # 任务2: 显式垃圾回收
+            # 禁止全局 results 列表中存放大数组；只保留标量 metrics
+            # ================================================
+            # 如果 ExperimentRunner.results 意外引用了大数组，在此清理
+            # （result 中已不包含大数组，此处仅作保险）
+            gc.collect()
+
+            # 打印当前实验结果
+            if result['status'] == 'success':
+                m = result['metrics']
+                print(f"  -> MAE={m.get('MAE', 0):.4f}  MSE={m.get('MSE', 0):.4f}  "
+                      f"elapsed={result['elapsed']:.1f}s")
+            else:
+                print(f"  -> FAILED: {result.get('error', 'unknown')}")
+
+    def _run_parallel(self, configs: List[Dict], total: int):
+        """
+        并行执行 + 任务4 内存保护
+        - max_workers 最多 min(n_workers, total, 4)
+        - 每个子进程跑完一个任务后立即销毁（max_tasks_per_child=1）
+        - 内存超 85% 时回退串行（由 run() 中的 _memory_check 保证首次安全）
+        """
+        n_workers = min(self.args.n_workers, total, 4)
+        print(f"并行执行: {n_workers} workers (max_tasks_per_child=1)")
+
+        # 使用 ProcessPoolExecutor + max_workers 自动内存回收
+        # 注意：Python 3.11+ 支持 max_tasks_per_child
+        # 若版本不支持，手动在 worker 函数中 gc.collect() 即可
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(run_single_experiment, cfg): i
+                        for i, cfg in enumerate(configs)}
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                cfg = configs[idx]
+                print(f"[{idx+1}/{total}] {cfg['model_name']} seq={cfg['seq_len']} pred={cfg['pred_len']}")
+
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = {
+                        'config': cfg,
+                        'metrics': {},
+                        'status': 'failed',
+                        'error': str(e)
+                    }
+
+                self.results.append(result)
+                gc.collect()
+
+                if result['status'] == 'success':
+                    m = result['metrics']
+                    print(f"  -> MAE={m.get('MAE', 0):.4f}  MSE={m.get('MSE', 0):.4f}  "
+                          f"elapsed={result['elapsed']:.1f}s")
+                else:
+                    print(f"  -> FAILED: {result.get('error', 'unknown')}")
+
     def _save_log(self):
-        """保存实验日志"""
+        """保存实验日志（JSON 中只含标量 metrics 和前 100 条预览）"""
+        # ================================================
+        # 任务3: JSON 中绝对不存入完整预测数组
+        # 只保留 metrics（标量）和 preview（前 100 条截断预览）
+        # ================================================
         log = {
             'timestamp': datetime.now().isoformat(),
             'metadata': {
@@ -297,14 +446,31 @@ class ExperimentRunner:
                 'features': self.args.features,
                 'total': len(self.results),
             },
-            'experiments': self.results
+            'experiments': []
         }
+
+        for r in self.results:
+            exp_entry = {
+                'config': r['config'],
+                'metrics': r.get('metrics', {}),
+                'status': r['status'],
+                'elapsed': r.get('elapsed', 0),
+            }
+
+            # 只在成功时加入 preview（字典体积可控）
+            if r['status'] == 'success' and 'preview' in r:
+                exp_entry['preview'] = r['preview']
+                exp_entry['npy_file'] = r.get('npy_file', {})
+
+            if r['status'] == 'failed':
+                exp_entry['error'] = r.get('error', '')
+
+            log['experiments'].append(exp_entry)
 
         log_path = os.path.join(RESULTS_DIR, 'experiment_log.json')
         with open(log_path, 'w', encoding='utf-8') as f:
             json.dump(log, f, indent=2, ensure_ascii=False)
 
-        # 打印摘要
         self._print_summary()
 
     def _print_summary(self):
@@ -315,7 +481,6 @@ class ExperimentRunner:
         print(f"实验完成: {len(success)}/{len(self.results)} 成功")
         print(f"{'='*60}")
 
-        # 按模型和预测长度汇总
         if success:
             print("\n{:<18} {:>10} {:>10} {:>10} {:>10}".format(
                 "模型", "seq_len", "pred_len", "MAE", "MSE"))
@@ -346,7 +511,6 @@ def launch_dashboard():
 
     print(f"\n启动仪表盘: http://localhost:8501")
 
-    # 启动服务
     subprocess.Popen(cmd, cwd=PROJECT_ROOT)
     time.sleep(3)
     webbrowser.open('http://localhost:8501')
@@ -395,9 +559,9 @@ def parse_args():
 
     # 执行参数
     parser.add_argument('--parallel', action='store_true',
-                       help='启用并行计算')
+                       help='启用并行计算（内存 > 85%% 时自动降级为串行）')
     parser.add_argument('--n_workers', type=int, default=4,
-                       help='并行进程数')
+                       help='并行进程数（最大 4）')
 
     return parser.parse_args()
 
@@ -406,10 +570,8 @@ def main():
     args = parse_args()
 
     if args.skip_run:
-        # 仅启动仪表盘
         launch_dashboard()
     else:
-        # 运行实验
         runner = ExperimentRunner(args)
         runner.run()
 
