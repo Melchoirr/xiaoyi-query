@@ -43,6 +43,8 @@ class EventAlignmentRequest(BaseModel):
     news_limit: int = Field(10, ge=1, le=50, description="新闻结果上限")
     event_limit: int = Field(20, ge=1, le=100, description="Polymarket 事件候选上限")
     fidelity: int = Field(60, ge=1, le=1440, description="价格点间隔(秒)")
+    price_spike_threshold: float = Field(0.04, ge=0.01, le=1.0, description="价格波动阈值（绝对值），默认 0.04 = 4%")
+    detect_spikes: bool = Field(True, description="是否检测价格波动，默认为 True")
 
 
 class PolymarketEventSummary(BaseModel):
@@ -70,10 +72,27 @@ class AlignedEventPoint(BaseModel):
     market_price: Optional[float] = None
 
 
+class PriceSpikePoint(BaseModel):
+    """价格波动点信息"""
+    timestamp: int = Field(..., description="Unix 时间戳(秒)")
+    datetime: str = Field(..., description="ISO8601 UTC 时间")
+    price_before: float = Field(..., description="波动前价格")
+    price_after: float = Field(..., description="波动后价格")
+    price_change: float = Field(..., description="价格变化绝对值")
+    price_change_pct: float = Field(..., description="价格变化百分比")
+
+
+class PriceSpikeAlert(BaseModel):
+    """价格波动及相关新闻"""
+    spike: PriceSpikePoint = Field(..., description="波动点详情")
+    related_news: List[EventItem] = Field(default=[], description="波动前后时间窗口内的相关新闻")
+
+
 class EventAlignmentResponse(BaseModel):
     query: str
     selected_event: Optional[PolymarketEventSummary] = None
     market_series: List[MarketTimePoint] = Field(default=[], description="市场时间序列")
     news: List[EventItem] = Field(default=[], description="相关新闻")
     aligned_events: List[AlignedEventPoint] = Field(default=[], description="对齐结果")
+    price_spike_alerts: List[PriceSpikeAlert] = Field(default=[], description="价格波动触发的新闻对齐")
     note: Optional[str] = None
