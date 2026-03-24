@@ -5,8 +5,20 @@
 ## 安装
 
 ```bash
-pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil
+pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
 ```
+
+## 重要更新 (v2.1 Bug 修复)
+
+v2.1 修复了以下关键问题：
+
+| 问题 | 修复 |
+|------|------|
+| `TypeError: PatternSearch.__init__() got an unexpected keyword argument 'top_k'` | `__init__` 参数名改为 `top_k`，所有模型末尾加 `**kwargs` |
+| `ValueError: non-broadcastable output operand...shape (662064,1) doesn't match...shape (662064,7)` | 移除 `Y_pred[:,:,0]` 破坏性切片；哈希桶 sum_cache 形状改为 `(pred_len, n_features)` |
+| 单模型失败导致整个脚本崩溃 | `run_single_experiment` 异常隔离，单个失败继续执行下一个 |
+| 实验失败后仪表盘未启动 | `--dashboard` 参数无论实验结果如何必定启动 |
+| 终端无进度条 | 引入 `logging` + `tqdm`，带时间戳和实验进度 |
 
 ## 使用方法
 

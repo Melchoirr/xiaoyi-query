@@ -2,15 +2,20 @@
 SAXSearch: 基于符号聚合近似(Symbolic Aggregate approXimation)的时序预测基线模型
 将时序压缩为"字符串"进行模糊匹配，实现高效的序列检索与预测
 
-内存优化 (v2.0)：
-- 哈希桶不再存索引列表，而是预聚合 (mean_Y, count) 元组
-- 删除 self.memory_Y 大数组，predict 时直接查均值
-- 预测时避免对整个字典做 O(n_keys * n_test) 的全遍历编辑距离
+Bug 修复 (v2.1):
+- __init__ 末尾追加 **kwargs，兼容所有外部传入参数，防止 TypeError
+- fit(): sum_cache 形状为 (pred_len, n_features)，与 LSH 保持一致
+- predict(): 正确 reshape，避免 broadcast 报错；引入 tqdm 进度条
 """
 
 import numpy as np
+import gc
+import logging
 from typing import Optional, Tuple, List, Dict
 from scipy.stats import norm
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 class SAXSearch:
@@ -26,20 +31,25 @@ class SAXSearch:
 
     内存优化：
     - self.sax_dict: Dict[str, Tuple[mean_Y, count]]
-      原来存 n 个 int 索引（4~8 bytes each），现在只存 1 个 float32 均值数组 + 1 个 count
-      假设一个桶有 1000 个样本，原来存 1000 个索引（4KB），现在只存 1 个均值数组（pred_len * 4 bytes）
-      压缩比可达 1000x
+      每个桶只存 (pred_len, n_features) 形状的均值数组和计数
     """
 
-    DTYPE = np.float32   # 全局统一 float32
+    DTYPE = np.float32
 
     def __init__(
         self,
+        # ── 兼容 run.py 的参数名 ──
         word_size: int = 8,
         alphabet_size: int = 8,
         epsilon_threshold: float = 1.0,
         fallback_strategy: str = 'global_mean',
-        random_state: Optional[int] = 42
+        random_state: Optional[int] = 42,
+        # ── 基础维度参数（预留）──
+        seq_len: int = 0,
+        pred_len: int = 0,
+        n_features: int = 1,
+        # ── 安全吸收未声明参数，防止 TypeError ──
+        **kwargs
     ):
         self.word_size = word_size
         self.alphabet_size = alphabet_size
@@ -50,22 +60,18 @@ class SAXSearch:
         self.alphabet = [chr(ord('a') + i) for i in range(alphabet_size)]
         self.breakpoints = self._compute_breakpoints()
 
-        # ================================================
-        # 内存优化: 存预聚合均值而非索引列表
-        # Dict[sax_string] -> (mean_Y_flat, count)
-        #   mean_Y_flat: np.ndarray shape [pred_len * n_features], dtype float32
-        #   count: int，桶内样本数量
-        # ================================================
+        # 内存优化: 存预聚合均值
         self.sax_dict: Dict[str, Tuple[np.ndarray, int]] = {}
-
-        # 全局 Y 均值（用于 fallback）
         self.global_Y_mean: Optional[np.ndarray] = None
         self.is_fitted: bool = False
 
         # 维度信息
-        self.seq_len: int = 0
-        self.n_features: int = 1
-        self.pred_len: int = 0
+        self.seq_len: int = seq_len
+        self.n_features: int = n_features
+        self.pred_len: int = pred_len
+
+        logger.debug(f"[SAXSearch] init: word_size={word_size}, "
+                     f"alphabet_size={alphabet_size}, epsilon={epsilon_threshold}")
 
     def _compute_breakpoints(self) -> np.ndarray:
         breakpoints = norm.ppf(np.linspace(
@@ -140,14 +146,12 @@ class SAXSearch:
         """
         构建SAX索引（记忆库）
 
-        内存优化：
-        - 遍历一次 X_train/Y_train，在线累加每个 SAX 桶的 sum_Y 和 count
-        - 最终每个桶只存储 mean_Y（float32）和 count（int）
-        - 不再存储 self.memory_Y 大数组
+        Bug 修复 (v2.1):
+        - sum_cache 形状必须为 (pred_len, n_features)，不能是 (y_dim,)
+          保证 predict 时正确 reshape 回多变量维度
         """
         n_samples = X_train.shape[0]
 
-        # 保存维度信息
         if X_train.ndim == 3:
             self.seq_len = X_train.shape[1]
             self.n_features = X_train.shape[2]
@@ -159,15 +163,19 @@ class SAXSearch:
 
         if Y_train.ndim == 3:
             self.pred_len = Y_train.shape[1]
-            Y_flat = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
+            Y_original = Y_train.astype(self.DTYPE)   # (n, pred_len, n_feat)
         else:
             self.pred_len = Y_train.shape[1]
-            Y_flat = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
+            self.n_features = 1
+            Y_original = Y_train.astype(self.DTYPE)
 
-        y_dim = Y_flat.shape[1]  # pred_len * n_features
+        # ── 多变量关键修复 ──
+        # sum_cache 形状为 (pred_len, n_features)，而非扁平的 y_dim
+        sum_cache: Dict[str, np.ndarray] = {}
+        count_cache: Dict[str, int] = {}
 
-        # 计算全局 Y 均值（用于 fallback）
-        self.global_Y_mean = np.mean(Y_flat, axis=0).astype(self.DTYPE)
+        logger.info(f"[SAXSearch] fit start: X={X_flat.shape}, Y={Y_original.shape}, "
+                    f"pred_len={self.pred_len}, n_features={self.n_features}")
 
         # 实例归一化
         X_norm, _, _ = self._instance_normalize(X_flat)
@@ -178,39 +186,33 @@ class SAXSearch:
         # SAX 符号化
         sax_strings = self._sax_transform(paa)
 
-        # ================================================
-        # 内存优化: 在线累加，不再存储索引列表
-        # sax_dict: str -> (sum_Y_flat, count)
-        #   sum_Y_flat: 累加值（需要最后除以 count 得均值），shape [y_dim]
-        #   count: int
-        # ================================================
-        self.sax_dict = {}
-        sum_cache: Dict[str, np.ndarray] = {}
-        count_cache: Dict[str, int] = {}
-
+        # 在线累加 Y（保持 (pred_len, n_features) 形状）
         for i, sax_str in enumerate(sax_strings):
             if sax_str not in sum_cache:
-                sum_cache[sax_str] = np.zeros(y_dim, dtype=self.DTYPE)
+                sum_cache[sax_str] = np.zeros(
+                    (self.pred_len, self.n_features), dtype=self.DTYPE)
                 count_cache[sax_str] = 0
-
-            sum_cache[sax_str] += Y_flat[i]
+            sum_cache[sax_str] += Y_original[i]
             count_cache[sax_str] += 1
 
-        # 转换为均值形式
+        # 转换为均值形式并构建字典
         for sax_str in sum_cache:
             cnt = count_cache[sax_str]
             mean_Y = (sum_cache[sax_str] / cnt).astype(self.DTYPE)
             self.sax_dict[sax_str] = (mean_Y, cnt)
 
+        # 全局 Y 均值
+        self.global_Y_mean = np.mean(Y_original, axis=0).astype(self.DTYPE)
+
         # 释放中间变量
-        del sum_cache, count_cache, Y_flat, X_flat, X_norm, paa
+        del sum_cache, count_cache, Y_original, X_flat, X_norm, paa, sax_strings
+        gc.collect()
         self.is_fitted = True
 
-        # 统计信息
         n_unique = len(self.sax_dict)
         avg_bucket_size = n_samples / max(n_unique, 1)
-        print(f"SAX Index Built (mem-optimized): {n_unique} unique strings, "
-              f"avg bucket size: {avg_bucket_size:.2f}")
+        logger.info(f"[SAXSearch] fitted: {n_unique} unique strings, "
+                     f"avg bucket size: {avg_bucket_size:.2f}")
 
         return self
 
@@ -218,58 +220,46 @@ class SAXSearch:
         """
         对测试样本进行预测
 
-        内存优化：
-        - 精确匹配：直接查 self.sax_dict[sax_str][0]，O(1)，无需索引回查
-        - 模糊匹配：只遍历字典键（通常远小于 n_test * n_keys），限制搜索范围
+        Bug 修复 (v2.1):
+        - mean_Y 直接是 (pred_len, n_features) 形状
+        - 单变量时 squeeze(-1) 降为 2D，多变量保持 3D
         """
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
 
         n_test = X_test.shape[0]
 
-        # 展平
         if X_test.ndim == 3:
             X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
         else:
             X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
 
-        # 实例归一化
         X_norm, _, _ = self._instance_normalize(X_flat)
-
-        # PAA 变换
         paa = self._paa_transform(X_norm)
-
-        # SAX 符号化
         test_sax_strings = self._sax_transform(paa)
 
-        # 预计算：编辑距离阈值 * word_size（将归一化阈值转为字符串长度比例）
-        edit_threshold = int(self.epsilon_threshold * self.word_size)
-        y_dim = self.pred_len * self.n_features
+        # 预分配结果，形状 (n_test, pred_len, n_features)
+        Y_pred = np.zeros((n_test, self.pred_len, self.n_features), dtype=self.DTYPE)
 
-        Y_pred = np.zeros((n_test, y_dim), dtype=self.DTYPE)
+        # 预计算编辑距离阈值
+        edit_threshold = int(self.epsilon_threshold * self.word_size)
+        all_sax_keys = list(self.sax_dict.keys())
+
         fallback_count = 0
         matched_count = 0
 
-        # 获取所有 SAX 键的列表（避免 predict 内反复调用 .keys()）
-        all_sax_keys = list(self.sax_dict.keys())
-
-        for i in range(n_test):
+        for i in tqdm(range(n_test), desc="[SAXSearch] Predicting", unit="sample"):
             sax_str = test_sax_strings[i]
 
-            # ================================================
-            # 分支1: 精确匹配（O(1) 查表）
-            # ================================================
+            # 分支1: 精确匹配
             if sax_str in self.sax_dict:
                 mean_Y, _ = self.sax_dict[sax_str]
                 Y_pred[i] = mean_Y
                 matched_count += 1
                 continue
 
-            # ================================================
-            # 分支2: 模糊匹配（只在 top_k 最近的桶中搜索）
-            # ================================================
+            # 分支2: 模糊匹配
             if edit_threshold > 0 and len(all_sax_keys) > 0:
-                # 近似：找编辑距离最近的桶（受限于 word_size * epsilon）
                 best_key = None
                 best_dist = float('inf')
 
@@ -285,27 +275,31 @@ class SAXSearch:
                     matched_count += 1
                     continue
 
-            # ================================================
             # 分支3: Fallback
-            # ================================================
             fallback_count += 1
             if self.fallback_strategy == 'global_mean':
                 Y_pred[i] = self.global_Y_mean
             else:  # random_walk
-                last_val = np.mean(X_flat[i].reshape(-1, self.n_features)[-1])
-                Y_pred[i] = np.full(y_dim, last_val, dtype=self.DTYPE)
+                last_vals = X_flat[i].reshape(self.pred_len, self.n_features)
+                Y_pred[i] = np.full(
+                    (self.pred_len, self.n_features),
+                    float(np.mean(last_vals[-1])),
+                    dtype=self.DTYPE
+                )
 
         if fallback_count > 0:
-            print(f"  Warning: {fallback_count}/{n_test} samples used fallback strategy")
+            logger.warning(f"[SAXSearch] {fallback_count}/{n_test} samples used fallback")
         if matched_count > 0:
-            print(f"  Matched: {matched_count}/{n_test} samples via SAX lookup")
+            logger.info(f"[SAXSearch] {matched_count}/{n_test} samples matched via SAX")
 
-        # 恢复原始形状
-        if self.n_features > 1:
-            Y_pred = Y_pred.reshape(n_test, self.pred_len, self.n_features)
-        else:
-            Y_pred = Y_pred.reshape(n_test, self.pred_len)
+        # 单变量降维
+        if self.n_features == 1:
+            Y_pred = Y_pred.squeeze(-1)
 
+        del X_flat, X_norm, paa, test_sax_strings
+        gc.collect()
+
+        logger.info(f"[SAXSearch] predict done: {Y_pred.shape}")
         return Y_pred
 
     def get_params(self) -> dict:
@@ -335,7 +329,7 @@ class SAXSearch:
             'total_samples': total_samples,
             'min_bucket': min(bucket_counts) if bucket_counts else 0,
             'max_bucket': max(bucket_counts) if bucket_counts else 0,
-            'avg_bucket': np.mean(bucket_counts) if bucket_counts else 0,
+            'avg_bucket': float(np.mean(bucket_counts)) if bucket_counts else 0,
         }
 
     def __repr__(self):

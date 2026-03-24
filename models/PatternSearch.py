@@ -1,11 +1,19 @@
 """
 PatternSearch: 基于记忆检索的时序预测基线模型
 使用 k-NN / KD-Tree 近邻检索算法寻找相似波形并进行预测
+
+Bug 修复 (v2.1):
+- __init__ 显式接收 top_k, weighted 参数（兼容 run.py 的命名约定）
+- 所有 __init__ 参数末尾追加 **kwargs，安全提取未声明参数，防止 TypeError
 """
 
 import numpy as np
 import gc
+import logging
+from tqdm import tqdm
 from sklearn.neighbors import NearestNeighbors
+
+logger = logging.getLogger(__name__)
 
 
 class PatternSearch:
@@ -20,14 +28,30 @@ class PatternSearch:
 
     DTYPE = np.float32   # 全局统一 float32
 
-    def __init__(self, k: int = 5, weighted: bool = True, algorithm: str = 'kd_tree'):
+    def __init__(
+        self,
+        # ── 兼容 run.py 传入的 top_k ──
+        top_k: int = 5,
+        weighted: bool = True,
+        algorithm: str = 'kd_tree',
+        # ── 基础维度参数（预留，暂未使用）──
+        seq_len: int = 0,
+        pred_len: int = 0,
+        n_features: int = 1,
+        # ── 安全吸收未声明参数，防止 TypeError ──
+        **kwargs
+    ):
         """
         Args:
-            k: 近邻数量，默认为5
+            top_k: 近邻数量（兼容 run.py 的参数命名）
             weighted: 是否使用逆距离加权，True为逆距离加权，False为简单平均
             algorithm: 近邻搜索算法，'kd_tree', 'ball_tree', 'brute', 'auto'
+            seq_len: 输入序列长度（预留）
+            pred_len: 预测序列长度（预留）
+            n_features: 特征数量（预留）
+            **kwargs: 安全吸收未声明参数
         """
-        self.k = k
+        self.k = top_k      # 内部用 k，兼容传入的 top_k
         self.weighted = weighted
         self.algorithm = algorithm
         self.nn_model = None
@@ -43,6 +67,7 @@ class PatternSearch:
         - 全部使用 float32
         - 不再需要复制数据（直接 astype）
         """
+        logger.info(f"[PatternSearch] fit: X={X_train.shape}, Y={Y_train.shape}")
         n_samples = X_train.shape[0]
 
         # 展平 + 强制 float32
@@ -60,6 +85,7 @@ class PatternSearch:
             self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
         else:
             self.pred_len = Y_train.shape[1]
+            self.n_features = 1
             self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
 
         # 使用 sklearn NearestNeighbors 构建 KD-Tree 索引
@@ -72,6 +98,9 @@ class PatternSearch:
         self.nn_model.fit(self.memory_X)
         self.is_fitted = True
 
+        logger.info(f"[PatternSearch] fitted: memory_X={self.memory_X.shape}, "
+                    f"memory_Y={self.memory_Y.shape}")
+
         return self
 
     def predict(self, X_test: np.ndarray, top_k: int = None) -> np.ndarray:
@@ -79,6 +108,7 @@ class PatternSearch:
         对测试样本进行预测
 
         内存优化：所有中间变量使用 float32，结果保持 float32
+        返回 shape: (n_test, pred_len) 或 (n_test, pred_len, n_features)
         """
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit() 方法")
@@ -93,6 +123,8 @@ class PatternSearch:
         else:
             n_test = X_test.shape[0]
             X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
+
+        logger.info(f"[PatternSearch] predict: {n_test} samples, k={k}")
 
         # 在记忆库中搜索 k 个最近邻
         distances, indices = self.nn_model.kneighbors(X_flat, n_neighbors=k)
@@ -111,15 +143,16 @@ class PatternSearch:
             Y_pred = np.mean(neighbor_Y, axis=1)
 
         # 释放测试展平数组
-        del X_flat
+        del X_flat, neighbor_Y, distances
         gc.collect()
 
-        # 恢复原始形状
+        # 恢复原始形状（与 fit 时 n_features 对齐）
         if self.n_features > 1:
             Y_pred = Y_pred.reshape(n_test, self.pred_len, self.n_features)
         else:
             Y_pred = Y_pred.reshape(n_test, self.pred_len)
 
+        logger.info(f"[PatternSearch] predict done: {Y_pred.shape}")
         return Y_pred
 
     def get_neighbors(self, X_query: np.ndarray, top_k: int = None):
