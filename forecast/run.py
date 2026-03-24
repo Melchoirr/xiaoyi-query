@@ -7,9 +7,16 @@ def main():
     parser = argparse.ArgumentParser(description='Time Series Forecasting')
 
     # basic config
+    parser.add_argument('--mode', type=str, default='single', choices=['single', 'fusion'],
+                        help='single: 单模型训练/测试; fusion: XGBoost 融合')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST', 'Sundial'])
+                        choices=['DLinear', 'PatchTST', 'Sundial', 'Chronos', 'Timer', 'TimesFM'])
+    parser.add_argument('--fusion_models', type=str,
+                        default='DLinear,PatchTST,Sundial,Chronos,Timer,TimesFM',
+                        help='fusion 模式下参与融合的模型，逗号分隔')
+    parser.add_argument('--save_val_pred', action='store_true', default=False,
+                        help='测试后额外保存 val 集预测（供 fusion 使用）')
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1')
@@ -42,8 +49,11 @@ def main():
     parser.add_argument('--stride', type=int, default=8)
     parser.add_argument('--dropout', type=float, default=0.1)
 
-    # Sundial config
+    # Foundation model configs
     parser.add_argument('--sundial_model', type=str, default='thuml/sundial-base-128m')
+    parser.add_argument('--chronos_model', type=str, default='amazon/chronos-bolt-small')
+    parser.add_argument('--timer_model', type=str, default='thuml/timer-base-84m')
+    parser.add_argument('--timesfm_model', type=str, default='google/timesfm-2.0-500m-pytorch')
 
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
@@ -77,8 +87,9 @@ def main():
         if args.freq == 'h' and default_freq != 'h':
             args.freq = default_freq
 
-    # Sundial device config
-    if args.model == 'Sundial':
+    # Foundation model device config
+    ZERO_SHOT_MODELS = ('Sundial', 'Chronos', 'Timer', 'TimesFM')
+    if args.model in ZERO_SHOT_MODELS:
         if args.use_gpu and torch.cuda.is_available():
             args.device = f'cuda:{args.gpu}'
         elif args.use_gpu and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -88,17 +99,29 @@ def main():
 
     setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
 
-    exp = Exp_Long_Term_Forecast(args)
-
-    if args.is_training and args.model != 'Sundial':
-        print(f'>>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>>')
-        exp.train(setting)
-
-        print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-        exp.test(setting, test=1)
+    if args.mode == 'fusion':
+        from forecast.fusion.stacking import XGBStacking
+        setting_template = f'{{model}}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
+        model_names = [m.strip() for m in args.fusion_models.split(',')]
+        stacker = XGBStacking(model_names, args.result_path, setting_template)
+        stacker.train()
+        stacker.predict_and_evaluate()
     else:
-        print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-        exp.test(setting)
+        exp = Exp_Long_Term_Forecast(args)
+
+        if args.is_training and args.model not in ZERO_SHOT_MODELS:
+            print(f'>>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+            exp.train(setting)
+
+            print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
+            exp.test(setting, test=1)
+        else:
+            print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
+            exp.test(setting)
+
+        if args.save_val_pred:
+            print(f'>>>>>>>saving val predictions : {setting}<<<<<<<<<<<<<<<<<<')
+            exp.test(setting, test=1, flag='val')
 
     print('Done!')
 

@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import optim
+from torch.utils.data import DataLoader
 
 from forecast.exp.exp_basic import Exp_Basic
 from forecast.data_provider.data_factory import data_provider
@@ -109,8 +110,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         return self.model
 
-    def test(self, setting, test=0):
-        test_data, test_loader = self._get_data(flag='test')
+    def test(self, setting, test=0, flag='test'):
+        data_set, _ = self._get_data(flag=flag)
+        test_loader = DataLoader(data_set, batch_size=self.args.batch_size,
+                                 shuffle=False, drop_last=False,
+                                 num_workers=self.args.num_workers)
 
         if test:
             print('loading model')
@@ -121,7 +125,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         preds = []
         trues = []
 
-        result_path = os.path.join(self.args.result_path, setting)
+        if flag == 'val':
+            result_path = os.path.join(self.args.result_path, setting, 'val')
+        else:
+            result_path = os.path.join(self.args.result_path, setting)
         os.makedirs(result_path, exist_ok=True)
 
         self.model.eval()
@@ -130,7 +137,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
-                if self.args.model == 'Sundial':
+                if self.args.model in ('Sundial', 'Chronos', 'Timer', 'TimesFM'):
                     outputs = self.model.predict(batch_x)
                     outputs = torch.from_numpy(outputs).float()
                 else:
@@ -146,10 +153,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
-        print(f'test shape: preds={preds.shape}, trues={trues.shape}')
+        print(f'{flag} shape: preds={preds.shape}, trues={trues.shape}')
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print(f'mse:{mse:.4f}, mae:{mae:.4f}')
+        print(f'RESULT|{setting}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}')
 
         np.save(os.path.join(result_path, 'pred.npy'), preds)
         np.save(os.path.join(result_path, 'true.npy'), trues)

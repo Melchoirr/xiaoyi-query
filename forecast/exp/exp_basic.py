@@ -1,6 +1,6 @@
 import os
 import torch
-from forecast.models import DLinear, PatchTST, Sundial
+from forecast.models import DLinear, PatchTST, Sundial, Chronos, Timer, TimesFM
 
 
 class Exp_Basic:
@@ -10,6 +10,9 @@ class Exp_Basic:
             'DLinear': DLinear,
             'PatchTST': PatchTST,
             'Sundial': Sundial,
+            'Chronos': Chronos,
+            'Timer': Timer,
+            'TimesFM': TimesFM,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)
