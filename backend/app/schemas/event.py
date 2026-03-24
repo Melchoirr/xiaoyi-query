@@ -33,3 +33,47 @@ class EventSearchResponse(BaseModel):
     """搜索结果响应模型"""
     total_results: int = Field(0, description="搜索到的结果总数")
     results: List[EventItem] = Field(default=[], description="新闻列表")
+
+
+class EventAlignmentRequest(BaseModel):
+    """事件与 Polymarket 波动对齐请求"""
+    query: str = Field(..., description="事件关键词，必填")
+    start_date: Optional[date] = Field(None, description="开始日期 (YYYY-MM-DD)")
+    end_date: Optional[date] = Field(None, description="结束日期 (YYYY-MM-DD)")
+    news_limit: int = Field(10, ge=1, le=50, description="新闻结果上限")
+    event_limit: int = Field(20, ge=1, le=100, description="Polymarket 事件候选上限")
+    fidelity: int = Field(60, ge=1, le=1440, description="价格点间隔(秒)")
+
+
+class PolymarketEventSummary(BaseModel):
+    id: str
+    title: str
+    slug: Optional[str] = None
+    category: Optional[str] = None
+    market_id: Optional[str] = None
+    market_question: Optional[str] = None
+    token_id: Optional[str] = None
+
+
+class MarketTimePoint(BaseModel):
+    timestamp: int = Field(..., description="Unix 时间戳(秒)")
+    datetime: str = Field(..., description="ISO8601 UTC 时间")
+    price: float = Field(..., description="Yes 概率，范围 0~1")
+
+
+class AlignedEventPoint(BaseModel):
+    title: str
+    url: str
+    news_time: Optional[str] = None
+    market_timestamp: Optional[int] = None
+    market_datetime: Optional[str] = None
+    market_price: Optional[float] = None
+
+
+class EventAlignmentResponse(BaseModel):
+    query: str
+    selected_event: Optional[PolymarketEventSummary] = None
+    market_series: List[MarketTimePoint] = Field(default=[], description="市场时间序列")
+    news: List[EventItem] = Field(default=[], description="相关新闻")
+    aligned_events: List[AlignedEventPoint] = Field(default=[], description="对齐结果")
+    note: Optional[str] = None

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import List, Optional
 
-from app.schemas.event import EventSearchRequest, EventSearchResponse, EventItem
+from app.schemas.event import EventAlignmentRequest, EventAlignmentResponse, EventSearchRequest, EventSearchResponse
+from app.clients.polymarket_client import PolymarketClient
 from app.services.event_service import EventService
 from app.clients.tavily_client import TavilyClient
 
@@ -20,9 +20,18 @@ def get_tavily_client() -> TavilyClient:
     """提供 TavilyClient 实例"""
     return TavilyClient()
 
-def get_event_service(tavily_client: TavilyClient = Depends(get_tavily_client)) -> EventService:
+
+def get_polymarket_client() -> PolymarketClient:
+    """提供 PolymarketClient 实例"""
+    return PolymarketClient()
+
+
+def get_event_service(
+    tavily_client: TavilyClient = Depends(get_tavily_client),
+    polymarket_client: PolymarketClient = Depends(get_polymarket_client),
+) -> EventService:
     """提供 EventService 实例，注入 client"""
-    return EventService(tavily_client)
+    return EventService(tavily_client, polymarket_client)
 
 # -----------------------------------------------------------------------------
 # API Endpoints
@@ -56,4 +65,25 @@ async def search_events(
     except Exception as e:
         # 捕获未知异常
         # 可以在这里记录日志 (logger.error(e))
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.get("/alignment", response_model=EventAlignmentResponse)
+async def get_event_alignment(
+    params: EventAlignmentRequest = Depends(),
+    service: EventService = Depends(get_event_service),
+) -> EventAlignmentResponse:
+    """
+    根据事件关键词，返回 Polymarket 随时间变化曲线与新闻对齐结果。
+    """
+    if params.start_date and params.end_date and params.start_date > params.end_date:
+        raise HTTPException(status_code=400, detail="start_date must be earlier than or equal to end_date")
+
+    try:
+        return await service.fetch_event_alignment(params)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal Server Error")

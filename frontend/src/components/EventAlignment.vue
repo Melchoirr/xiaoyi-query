@@ -121,7 +121,7 @@ const loading = ref(false)
 const chartRef = ref(null)
 const newsList = ref([])
 let myChart = null
-const EVENTS_API_URL = 'http://localhost:8000/api/events/search'
+const EVENTS_API_URL = 'http://localhost:8000/api/events/alignment'
 
 const formatDate = (dateStr) => {
   const date = new Date(dateStr)
@@ -145,80 +145,86 @@ function normalizeNewsItem(item) {
   }
 }
 
-async function fetchNewsFromBackend(keyword, start, end) {
+function normalizeMarketSeries(series) {
+  if (!Array.isArray(series)) return []
+  return series
+    .map((point) => {
+      const ts = Number(point?.timestamp)
+      const price = Number(point?.price)
+      if (!Number.isFinite(ts) || !Number.isFinite(price)) return null
+      return [ts * 1000, price]
+    })
+    .filter(Boolean)
+    .sort((a, b) => a[0] - b[0])
+}
+
+async function fetchAlignmentFromBackend(keyword, start, end) {
   const params = new URLSearchParams({ query: keyword })
   if (start) params.set('start_date', start)
   if (end) params.set('end_date', end)
+  params.set('news_limit', '15')
+  params.set('fidelity', '300')
 
   const response = await fetch(`${EVENTS_API_URL}?${params.toString()}`, {
     method: 'GET'
   })
 
   if (!response.ok) {
-    throw new Error(`获取新闻失败: ${response.status} ${response.statusText}`)
+    throw new Error(`获取对齐数据失败: ${response.status} ${response.statusText}`)
   }
 
   const payload = await response.json()
-  const results = Array.isArray(payload?.results) ? payload.results : []
+  const news = Array.isArray(payload?.news) ? payload.news : []
+  const alignedEvents = Array.isArray(payload?.aligned_events) ? payload.aligned_events : []
+  const marketSeries = normalizeMarketSeries(payload?.market_series)
 
-  return results
+  const normalizedNews = news
     .map(normalizeNewsItem)
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-}
 
-function generateMockTimeSeries() {
-  const data = []
-  let currentPrice = 0.3
-  const now = new Date().getTime()
-  const oneHour = 3600 * 1000
-
-  for (let i = 7 * 24; i >= 0; i--) {
-    const time = now - i * oneHour
-    currentPrice = currentPrice + (Math.random() - 0.48) * 0.05
-    if (currentPrice > 0.99) currentPrice = 0.99
-    if (currentPrice < 0.01) currentPrice = 0.01
-    
-    if (i === 120) currentPrice += 0.3
-    if (i === 80) currentPrice -= 0.25
-    if (i === 24) currentPrice += 0.2
-
-    data.push([time, Math.round(currentPrice * 100) / 100])
-  }
-  return data
-}
-
-function alignNewsToCurve(timeSeriesData, newsData) {
-  const markPointData = []
-
-  newsData.forEach((news) => {
-    const newsTime = news.timestamp
-    
-    if (!newsTime) {
-      markPointData.push(null)
-      return
-    }
-    
-    let closestPoint = timeSeriesData[0]
-    let minDiff = Math.abs(newsTime - closestPoint[0])
-
-    for (let i = 1; i < timeSeriesData.length; i++) {
-      const diff = Math.abs(newsTime - timeSeriesData[i][0])
-      if (diff < minDiff) {
-        minDiff = diff
-        closestPoint = timeSeriesData[i]
-      }
-    }
-
-    markPointData.push({
-      coord: [closestPoint[0], closestPoint[1]],
-      name: news.title,
-      newsInfo: news,
-      alignedX: closestPoint[0],
-      alignedY: closestPoint[1]
-    })
+  const newsByKey = new Map()
+  normalizedNews.forEach((item) => {
+    const key = `${item.title}@@${item.url}`
+    newsByKey.set(key, item)
   })
 
-  return markPointData.filter(p => p !== null)
+  const markPoints = alignedEvents
+    .map((item) => {
+      const marketTsSec = Number(item?.market_timestamp)
+      const marketPrice = Number(item?.market_price)
+      if (!Number.isFinite(marketTsSec) || !Number.isFinite(marketPrice)) return null
+
+      const key = `${item?.title || ''}@@${item?.url || ''}`
+      const baseNews = newsByKey.get(key)
+
+      return {
+        coord: [marketTsSec * 1000, marketPrice],
+        name: item?.title || '事件',
+        newsInfo: {
+          title: item?.title || '无标题新闻',
+          content: baseNews?.content || '',
+          url: item?.url || ''
+        },
+        alignedX: marketTsSec * 1000,
+        alignedY: marketPrice
+      }
+    })
+    .filter(Boolean)
+
+  const enrichedNews = normalizedNews.map((newsItem) => {
+    const alignedPoint = markPoints.find((p) => p.newsInfo.title === newsItem.title && p.newsInfo.url === newsItem.url)
+    return {
+      ...newsItem,
+      alignedPoint: alignedPoint || null
+    }
+  })
+
+  return {
+    marketSeries,
+    news: enrichedNews,
+    markPoints,
+    note: payload?.note || ''
+  }
 }
 
 function renderChart(timeSeries, markPoints) {
@@ -307,29 +313,25 @@ const handleSearch = async () => {
   loading.value = true
   
   try {
-    // 价格曲线仍然使用前端 Mock
-    const mockSeries = generateMockTimeSeries()
-
-    // 新闻改为从后端接口获取
-    const backendNews = await fetchNewsFromBackend(
+    const result = await fetchAlignmentFromBackend(
       query.value.trim(),
       startDate.value,
       endDate.value
     )
-    const alignedMarkPoints = alignNewsToCurve(mockSeries, backendNews)
 
-    newsList.value = backendNews.map((news) => ({
-      ...news,
-      alignedPoint: alignedMarkPoints.find(p => p && p.newsInfo === news) || null
-    }))
+    if (result.note && result.marketSeries.length === 0) {
+      alert(`提示: ${result.note}`)
+    }
+
+    newsList.value = result.news
 
     if (!myChart) {
       initChart()
     }
-    renderChart(mockSeries, alignedMarkPoints)
+    renderChart(result.marketSeries, result.markPoints)
   } catch (error) {
     console.error('Error in handleSearch:', error)
-    alert('新闻获取失败，请确认后端服务已启动: http://localhost:8000')
+    alert('对齐数据获取失败，请确认后端服务已启动: http://localhost:8000')
   } finally {
     loading.value = false
   }
