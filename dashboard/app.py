@@ -264,10 +264,10 @@ def render_header():
 
 def render_sidebar() -> Dict[str, Any]:
     """
-    渲染侧边栏配置（含一键启动实验面板）
+    渲染侧边栏（含 st.form 一键启动 + 实时终端 Log）
 
-    Returns:
-        用户选择的配置字典
+    任务三：st.form + subprocess.Popen 实时打屏，不阻塞 UI
+    任务四（表单部分）：允许手填 seq_len / pred_len（覆盖预设列表）
     """
     st.sidebar.markdown("## ⚙️ 配置选项")
 
@@ -275,18 +275,16 @@ def render_sidebar() -> Dict[str, Any]:
     output_dir = st.sidebar.text_input(
         "结果目录",
         value="./results",
-        help="实验结果JSON文件所在目录"
+        help="实验结果 JSON 文件所在目录"
     )
 
     # ─────────────────────────────────────────────────────────────────
-    # 任务3+4: 一键启动新实验（🚀 expander 面板）
-    # - 动态模型专属参数表单
-    # - 实时终端 Log 打屏（非阻塞 Popen + st.empty 滚动更新）
+    # 任务三：st.form 一键启动 + 实时 Log（非阻塞 Popen）
     # ─────────────────────────────────────────────────────────────────
-    with st.sidebar.expander("🚀 启动新实验", expanded=False):
-        st.markdown("**快速启动配置**")
+    with st.sidebar.form("experiment_form", clear_on_submit=False):
+        st.markdown("### 🚀 一键启动实验")
 
-        # 模型选择（决定下方显示哪些专属参数）
+        # 模型选择
         run_model = st.selectbox(
             "模型",
             options=['PatternSearch', 'LSHSearch', 'SAXSearch', 'all'],
@@ -294,18 +292,16 @@ def render_sidebar() -> Dict[str, Any]:
             help="选择要运行的模型"
         )
 
-        # ── 模型专属参数面板 ──
-        # PatternSearch
+        # ── PatternSearch 参数 ──
         if run_model in ('PatternSearch', 'all'):
             with st.expander("PatternSearch 参数", expanded=False):
                 run_top_k = st.number_input(
                     "top_k（近邻数）", min_value=1, max_value=100,
-                    value=5, step=1,
-                    help="取最近邻的数量"
+                    value=5, step=1, help="取最近邻的数量"
                 )
                 run_weighted_ps = st.checkbox("weighted（逆距离加权）", value=True)
 
-        # LSHSearch
+        # ── LSHSearch 参数 ──
         if run_model in ('LSHSearch', 'all'):
             with st.expander("LSHSearch 参数", expanded=False):
                 run_n_hash = st.number_input(
@@ -322,7 +318,7 @@ def render_sidebar() -> Dict[str, Any]:
                 )
                 run_lsh_weighted = st.checkbox("lsh_weighted（加权重排）", value=False)
 
-        # SAXSearch
+        # ── SAXSearch 参数 ──
         if run_model in ('SAXSearch', 'all'):
             with st.expander("SAXSearch 参数", expanded=False):
                 run_word_size = st.number_input(
@@ -339,32 +335,49 @@ def render_sidebar() -> Dict[str, Any]:
                 )
                 run_sax_weighted = st.checkbox("sax_weighted（加权聚合）", value=True)
 
-        # ── 全局参数 ──
-        seq_presets = [24, 48, 96, 192, 336, 720]
-        pred_presets = [24, 48, 96, 192, 336, 720]
-        run_seq_len = st.selectbox("seq_len（输入长度）", options=seq_presets, index=2)
-        run_pred_len = st.selectbox("pred_len（预测长度）", options=pred_presets, index=1)
+        # ── 全局参数（手填，支持 TSLib 常用非预设值）────────────────
+        run_seq_len = st.number_input(
+            "seq_len（输入长度）", min_value=1, max_value=10000,
+            value=96, step=1,
+            help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
+        )
+        run_pred_len = st.number_input(
+            "pred_len（预测长度）", min_value=1, max_value=10000,
+            value=48, step=1,
+            help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
+        )
+        run_mean_shift = st.checkbox(
+            "启用 Mean-Shift（DLinear-style）", value=False,
+            help="训练和推理时均减去输入序列均值"
+        )
         run_gpu = st.checkbox("启用 GPU 加速", value=False)
 
-        if st.button("▶️ 运行实验", type="primary", use_container_width=True):
-            # ─────────────────────────────────────────────────────────
-            # 任务4（核心）：实时终端 Log 打屏
-            # 使用 Popen 非阻塞 + st.empty 容器实时追加输出
-            # ─────────────────────────────────────────────────────────
+        submitted = st.form_submit_button(
+            "▶️ 运行实验",
+            type="primary",
+            use_container_width=True
+        )
+
+        # ── 任务三（核心）：提交后通过 subprocess.Popen 非阻塞启动 ──
+        if submitted:
             import subprocess
             import sys
 
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            run_py = os.path.join(project_root, 'run.py')
+
             cmd = [
                 sys.executable,
-                os.path.join(os.path.dirname(os.path.dirname(__file__)), "run.py"),
+                run_py,
                 "--model", run_model,
-                "--seq_len", str(run_seq_len),
-                "--pred_len", str(run_pred_len),
+                "--seq_len", str(int(run_seq_len)),
+                "--pred_len", str(int(run_pred_len)),
             ]
             if run_gpu:
                 cmd.append("--use_gpu")
+            if run_mean_shift:
+                cmd.append("--mean_shift")
 
-            # 追加模型专属参数
             if run_model == 'PatternSearch':
                 cmd.extend(["--top_k", str(int(run_top_k))])
                 cmd.extend(["--weighted", str(run_weighted_ps).lower()])
@@ -379,9 +392,9 @@ def render_sidebar() -> Dict[str, Any]:
                 cmd.extend(["--bucket_top_k", str(int(run_bucket_k))])
                 cmd.extend(["--sax_weighted", str(run_sax_weighted).lower()])
 
-            st.info(f"执行命令: `{' '.join(cmd)}`")
+            st.info(f"执行命令：`{' '.join(cmd)}`")
 
-            # 实时 Log 容器
+            # 实时 Log 容器（不阻塞 UI）
             log_placeholder = st.empty()
             log_lines: list = []
 
@@ -391,16 +404,18 @@ def render_sidebar() -> Dict[str, Any]:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    bufsize=1
+                    bufsize=1,
+                    cwd=project_root
                 )
 
                 spinner_col, log_col = st.columns([1, 3])
                 with spinner_col:
-                    spinner = spinner_placeholder = st.empty()
+                    spinner_placeholder = st.empty()
 
                 with log_col:
                     spinner_placeholder = st.empty()
 
+                # 逐行读取直到进程结束
                 for raw_line in iter(process.stdout.readline, ''):
                     if not raw_line:
                         break
@@ -409,44 +424,67 @@ def render_sidebar() -> Dict[str, Any]:
                     # 保留最近 200 行避免内存膨胀
                     if len(log_lines) > 200:
                         log_lines = log_lines[-200:]
-                    # 实时刷新到页面
+                    # 实时追加到页面
+                    spinner_placeholder.info("⏳ 实验运行中（见右侧日志）...")
                     with log_placeholder.container():
-                        st.code("\n".join(log_lines[-80:]), language=None, height=300)
+                        st.code("\n".join(log_lines[-80:]), language=None, height=320)
 
                 process.wait()
 
                 with log_placeholder.container():
                     if process.returncode == 0:
+                        spinner_placeholder.success("✅ 实验完成！")
                         st.success("✅ 实验完成！正在刷新页面...")
                         st.rerun()
                     else:
+                        spinner_placeholder.error(f"❌ 失败 (exit {process.returncode})")
                         st.error(f"❌ 实验失败（exit {process.returncode}）")
                         st.code("\n".join(log_lines[-50:]), language=None, height=200)
             except Exception as ex:
                 st.error(f"❌ 启动失败: {ex}")
 
-    # 可用性检查
+    # ── 以下：已有实验结果的可视化选择器 ─────────────────────────────
     log_data = load_experiment_log(output_dir)
 
     if log_data is None:
-        st.sidebar.warning("⚠️ 未找到实验日志文件，请先运行: python run.py --model all")
-        return {'output_dir': output_dir, 'log_data': None}
+        st.sidebar.warning("⚠️ 未找到实验日志文件，请先运行实验")
+        return {
+            'output_dir': output_dir,
+            'log_data': None,
+            'selected_model': None,
+            'selected_pred_len': None,
+            'selected_seq_len': None,
+            'selected_sample_id': 0,
+            'experiments': []
+        }
 
-    # 加载成功
     st.sidebar.success("✅ 实验日志已加载")
 
-    # 显示元数据
     metadata = log_data.get('metadata', {})
     with st.sidebar.expander("📊 实验元数据", expanded=False):
         st.write(f"**数据集:** {metadata.get('dataset', 'N/A')}")
         st.write(f"**特征模式:** {metadata.get('features', 'N/A')}")
         st.write(f"**目标列:** {metadata.get('target', 'N/A')}")
-        st.write(f"**总实验数:** {metadata.get('total_experiments', 0)}")
+        st.write(f"**总实验数:** {metadata.get('total', 0)}")
         st.write(f"**时间戳:** {metadata.get('timestamp', 'N/A')[:19]}")
 
-    # 模型选择
     experiments = log_data.get('experiments', [])
-    available_models = sorted(list(set(exp['config']['model_name'] for exp in experiments)))
+    available_models = sorted(list(set(
+        exp['config']['model_name'] for exp in experiments
+        if exp['status'] == 'success'
+    )))
+
+    if not available_models:
+        st.sidebar.warning("⚠️ 没有成功的实验")
+        return {
+            'output_dir': output_dir,
+            'log_data': log_data,
+            'selected_model': None,
+            'selected_pred_len': None,
+            'selected_seq_len': None,
+            'selected_sample_id': 0,
+            'experiments': experiments
+        }
 
     selected_model = st.sidebar.selectbox(
         "选择模型",
@@ -455,11 +493,10 @@ def render_sidebar() -> Dict[str, Any]:
         help="选择要查看的模型"
     )
 
-    # 预测长度选择
     pred_lens = sorted(list(set(
         exp['config']['pred_len']
         for exp in experiments
-        if exp['config']['model_name'] == selected_model
+        if exp['config']['model_name'] == selected_model and exp['status'] == 'success'
     )))
 
     selected_pred_len = st.sidebar.selectbox(
@@ -469,12 +506,12 @@ def render_sidebar() -> Dict[str, Any]:
         help="选择预测序列长度"
     )
 
-    # 序列长度选择
     seq_lens = sorted(list(set(
         exp['config']['seq_len']
         for exp in experiments
         if exp['config']['model_name'] == selected_model
         and exp['config']['pred_len'] == selected_pred_len
+        and exp['status'] == 'success'
     )))
 
     selected_seq_len = st.sidebar.selectbox(
@@ -484,8 +521,7 @@ def render_sidebar() -> Dict[str, Any]:
         help="选择输入序列长度"
     )
 
-    # 样本ID选择
-    max_samples = min(100, metadata.get('n_samples_saved', 100))
+    max_samples = min(100, len(experiments) * 5)
     selected_sample_id = st.sidebar.slider(
         "样本 ID",
         min_value=0,
@@ -662,15 +698,18 @@ def render_waveform_comparison(
     experiments: Optional[List[Dict[str, Any]]] = None
 ):
     """
-    渲染微观波形对比部分
+    渲染微观波形对比
 
-    Args:
-        config: 包含用户选择的配置（须含 experiments 或可从 log_data 取）
+    任务四（指标）：直接读取 JSON 里的 MAE/MSE/RMSE/MAPE/CORR，
+                   用 cols = st.columns(5) 紧凑排列，绝不重新计算。
+
+    任务四（波形）：读取 preview['history']，X 轴从 -seq_len 到 pred_len-1，
+                   [-seq_len, -1] 画历史真实，[0, pred_len-1] 画未来真实与预测，
+                   x=0 画垂直虚线分隔过去与未来。
     """
     st.markdown("---")
     st.markdown("## 🔍 微观波形探查 (Case Study)")
 
-    # 与 render_sidebar 返回的键对齐；并允许调用方显式传入 experiments
     if experiments is None:
         experiments = config.get('experiments')
     if experiments is None and config.get('log_data') is not None:
@@ -678,292 +717,368 @@ def render_waveform_comparison(
     if experiments is None:
         experiments = []
 
-    model = config['selected_model']
-    pred_len = config['selected_pred_len']
-    seq_len = config['selected_seq_len']
-    sample_id = config['selected_sample_id']
-    output_dir = config['output_dir']
+    model = config.get('selected_model')
+    pred_len = config.get('selected_pred_len')
+    seq_len = config.get('selected_seq_len')
+    sample_id = config.get('selected_sample_id', 0)
+    output_dir = config.get('output_dir', './results')
+
+    if model is None or pred_len is None or seq_len is None:
+        st.info("💡 请从侧边栏选择模型和参数后查看波形。")
+        return
 
     st.markdown(f"""
     <div class="info-panel">
         <strong>当前配置:</strong> {model} | seq_len={seq_len} | pred_len={pred_len} | 样本 #{sample_id}
     </div>
     """, unsafe_allow_html=True)
-
     st.markdown("")
 
-    # 尝试加载预测结果
-    # 首先从 experiments 中找到匹配的实验配置
+    # ── 任务四（指标5列）：从 JSON 直接读取，不重新计算 ───────────────
     matching_exp = None
     for exp in experiments:
-        if (exp['config']['model_name'] == model
+        if (exp['status'] == 'success'
+            and exp['config']['model_name'] == model
             and exp['config']['pred_len'] == pred_len
             and exp['config']['seq_len'] == seq_len):
             matching_exp = exp
             break
 
-    # 获取模型配置参数
-    config_params = matching_exp['config'] if matching_exp else None
-    preds, trues, x_test = load_predictions(
-        output_dir, model, seq_len, pred_len, config_params
-    )
-
-    if preds is None or trues is None:
-        st.info("💡 提示: 预测结果文件不存在，请确保已运行相应实验。")
-
-        # 生成示例数据展示仪表盘功能
-        st.markdown("### 📋 示例波形展示（模拟数据）")
-
-        # 生成模拟数据
-        n_timesteps = pred_len
-        x_axis = list(range(n_timesteps))
-
-        # 真实值：带噪声的正弦波
-        true_wave = np.sin(np.linspace(0, 4 * np.pi, n_timesteps)) * 2 + np.random.randn(n_timesteps) * 0.3
-
-        # 预测值：基于模型类型稍有偏差
-        if model == 'PatternSearch':
-            pred_wave = true_wave + np.random.randn(n_timesteps) * 0.2
-        elif model == 'LSHSearch':
-            pred_wave = true_wave + np.random.randn(n_timesteps) * 0.4
-        else:  # SAXSearch
-            pred_wave = true_wave + np.random.randn(n_timesteps) * 0.5
-
-        # 创建交互式图表
-        fig = go.Figure()
-
-        # 添加真实值曲线
-        fig.add_trace(go.Scatter(
-            x=x_axis,
-            y=true_wave,
-            mode='lines+markers',
-            name='真实值 (Ground Truth)',
-            line=dict(color='#2E86AB', width=2),
-            marker=dict(size=6),
-            hovertemplate='时间点: %{x}<br>真实值: %{y:.4f}<extra></extra>'
-        ))
-
-        # 添加预测值曲线
-        fig.add_trace(go.Scatter(
-            x=x_axis,
-            y=pred_wave,
-            mode='lines+markers',
-            name='预测值 (Prediction)',
-            line=dict(color='#E94F37', width=2, dash='dash'),
-            marker=dict(size=6),
-            hovertemplate='时间点: %{x}<br>预测值: %{y:.4f}<extra></extra>'
-        ))
-
-        # 更新布局
-        fig.update_layout(
-            title=f'{model} 模型预测效果（示例数据）',
-            xaxis_title='时间步 (Timestep)',
-            yaxis_title='值 (Value)',
-            template='plotly_white',
-            hovermode='x unified',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="right",
-                x=0.99
-            ),
-            height=450,
-            margin=dict(l=40, r=40, t=60, b=40)
-        )
-
-        st.plotly_chart(fig, width="stretch")
-
+    if matching_exp is not None:
+        m = matching_exp.get('metrics', {})
+        mae = m.get('MAE', 0.0)
+        mse = m.get('MSE', 0.0)
+        rmse = m.get('RMSE', 0.0)
+        mape = m.get('MAPE', 0.0)
+        corr = m.get('CORR', 0.0)
     else:
-        # ─────────────────────────────────────────────────────────────────
-        # 任务7: 历史上下文波形（X_test 作为历史背景，与 pred_len 预测并列）
-        # X 轴设计：[-seq_len, 0) 为历史，0 为分界线，[0, pred_len] 为未来/预测
-        # ─────────────────────────────────────────────────────────────────
-        st.markdown(f"### 📈 预测结果波形 (样本 #{sample_id})")
+        mae = mse = rmse = mape = corr = 0.0
 
-        # 提取指定样本
-        if sample_id < len(preds) and sample_id < len(trues):
-            pred_sample = preds[sample_id]
-            true_sample = trues[sample_id]
+    cols = st.columns(5)
+    metric_labels = ['MAE', 'MSE', 'RMSE', 'MAPE', 'CORR']
+    metric_values = [mae, mse, rmse, mape, corr]
+    metric_colors = [
+        'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+        'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+        'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+        'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
+    ]
 
-            # 多变量取第一个特征
-            if pred_sample.ndim > 1:
-                pred_sample = pred_sample[:, 0]
-            if true_sample.ndim > 1:
-                true_sample = true_sample[:, 0]
+    for c, label, val, color in zip(cols, metric_labels, metric_values, metric_colors):
+        with c:
+            st.markdown(f"""
+            <div style="background: {color}; padding: 1rem; border-radius: 10px;
+                        color: white; text-align: center;">
+                <div style="font-size: 0.85rem; opacity: 0.9;">{label}</div>
+                <div style="font-size: 1.6rem; font-weight: bold; margin-top: 0.3rem;">{val:.4f}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-            # X 轴设计：x=0 为分界线
-            # 左侧：[-seq_len, -1]（历史）
-            # 右侧：[0, pred_len-1]（未来）
-            hist_len = seq_len
-            pred_len_actual = len(pred_sample)   # = pred_len
+    st.markdown("")
 
-            # 历史序列（X_test）作为"过去"的 ground truth 背景
-            if x_test is not None and sample_id < len(x_test):
-                hist_sample = x_test[sample_id]
-                if hist_sample.ndim > 1:
-                    hist_sample = hist_sample[:, 0]
+    # ── 尝试从 JSON preview 读取连贯波形数据 ─────────────────────────
+    preview = None
+    if matching_exp and 'preview' in matching_exp:
+        preview = matching_exp['preview']
+
+    if preview is not None and 'history' in preview and 'trues' in preview and 'preds' in preview:
+        history_list = preview['history']      # list of list（展平的 2D）
+        true_list = preview['trues']           # list of list
+        pred_list = preview['preds']           # list of list
+
+        if (sample_id < len(history_list)
+            and sample_id < len(true_list)
+            and sample_id < len(pred_list)):
+
+            # 恢复数据（从展平的 2D 恢复）
+            hist_raw = np.array(history_list[sample_id])
+            true_raw = np.array(true_list[sample_id])
+            pred_raw = np.array(pred_list[sample_id])
+
+            # 推算 n_features：从 true_raw 的长度与 pred_len 推断
+            true_n_feat = 1 if true_raw.ndim == 1 else true_raw.shape[-1]
+
+            # 多变量取第 0 特征
+            if true_n_feat > 1:
+                hist_flat = hist_raw[:(len(hist_raw) // true_n_feat) * true_n_feat]
+                hist_sample = hist_flat.reshape(-1, true_n_feat)[:, 0]
+                true_flat = true_raw[:(len(true_raw) // true_n_feat) * true_n_feat]
+                true_sample = true_flat.reshape(-1, true_n_feat)[:, 0]
+                pred_flat = pred_raw[:(len(pred_raw) // true_n_feat) * true_n_feat]
+                pred_sample = pred_flat.reshape(-1, true_n_feat)[:, 0]
             else:
-                hist_sample = None
+                hist_sample = hist_raw.flatten()
+                true_sample = true_raw.flatten()
+                pred_sample = pred_raw.flatten()
+
+            # ── 连贯波形：X 轴从 -seq_len 到 pred_len-1 ────────────
+            st.markdown(f"### 📈 连贯波形（样本 #{sample_id}）")
 
             fig = go.Figure()
 
-            # ── 历史真实波形（淡色背景，X ∈ [-seq_len, 0)）──
-            if hist_sample is not None:
-                hist_x = list(range(-hist_len, 0))
-                fig.add_trace(go.Scatter(
-                    x=hist_x,
-                    y=hist_sample.tolist(),
-                    mode='lines',
-                    name='历史真实 (History)',
-                    line=dict(color='#94C8D8', width=1.8),
-                    opacity=0.75,
-                    hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
-                ))
-
-            # ── 未来真实波形（蓝色，X ∈ [0, pred_len-1]）──
-            future_x = list(range(0, pred_len_actual))
+            # 左侧：历史真实（[-seq_len, -1]，淡色背景）
+            hist_x = list(range(-seq_len, 0))
             fig.add_trace(go.Scatter(
-                x=future_x,
-                y=true_sample.tolist(),
-                mode='lines+markers',
+                x=hist_x, y=hist_sample.tolist(), mode='lines',
+                name='历史真实 (History)',
+                line=dict(color='#94C8D8', width=1.8), opacity=0.7,
+                hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
+            ))
+
+            # 右侧：未来真实（[0, pred_len-1]）
+            future_x = list(range(0, len(true_sample)))
+            fig.add_trace(go.Scatter(
+                x=future_x, y=true_sample.tolist(), mode='lines+markers',
                 name='未来真实 (Ground Truth)',
                 line=dict(color='#2E86AB', width=2.5),
                 marker=dict(size=6, symbol='circle'),
                 hovertemplate='时间: %{x}<br>真实值: %{y:.4f}<extra></extra>'
             ))
 
-            # ── 预测波形（红色虚线，X ∈ [0, pred_len-1]）──
+            # 右侧：模型预测（红色虚线）
             fig.add_trace(go.Scatter(
-                x=future_x,
-                y=pred_sample.tolist(),
-                mode='lines+markers',
+                x=future_x, y=pred_sample.tolist(), mode='lines+markers',
                 name='模型预测 (Prediction)',
                 line=dict(color='#E94F37', width=2.5, dash='dash'),
                 marker=dict(size=6, symbol='square'),
                 hovertemplate='时间: %{x}<br>预测值: %{y:.4f}<extra></extra>'
             ))
 
-            # ── 垂直虚线分隔历史与未来（X=0）──
-            fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.5)
+            # x=0 垂直虚线（历史/未来分界线）
+            fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.8)
 
-            # 误差指标
-            mae = float(np.mean(np.abs(pred_sample - true_sample)))
-            mse = float(np.mean((pred_sample - true_sample) ** 2))
-
-            # ── 误差区域（预测 - 真实，填充在预测与真实之间）──
+            # 误差区域填充
             fig.add_trace(go.Scatter(
                 x=future_x + future_x[::-1],
                 y=(pred_sample - true_sample).tolist() + [0] * len(future_x),
-                fill='toself',
-                fillcolor='rgba(233, 79, 55, 0.15)',
+                fill='toself', fillcolor='rgba(233, 79, 55, 0.12)',
                 line=dict(color='rgba(255,255,255,0)'),
-                name='预测误差带',
-                showlegend=True,
+                name='预测误差带', showlegend=True,
                 hovertemplate='时间: %{x}<br>误差: %{y:.4f}<extra></extra>'
             ))
 
+            total_x_range = seq_len + len(true_sample)
             fig.update_layout(
-                title=f'{model} | seq={seq_len} | pred={pred_len} | '
+                title=f'{model} | seq={seq_len} | pred={len(true_sample)} | '
                       f'MAE={mae:.4f} | MSE={mse:.4f}',
                 xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
                 yaxis_title='值',
                 template='plotly_white',
                 hovermode='x unified',
-                legend=dict(
-                    orientation='h',
-                    yanchor='bottom',
-                    y=1.02,
-                    xanchor='right',
-                    x=1
-                ),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
                 height=500,
                 margin=dict(l=40, r=40, t=80, b=40),
                 xaxis=dict(
-                    tickmode='linear',
-                    tick0=-seq_len,
-                    dtick=max(1, (seq_len + pred_len_actual) // 12)
+                    tickmode='linear', tick0=-seq_len,
+                    dtick=max(1, total_x_range // 12)
                 )
             )
 
             st.plotly_chart(fig, width="stretch")
 
             # 数值统计
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("真实值均值", f"{float(np.mean(true_sample)):.4f}")
-            with col2:
-                st.metric("预测值均值", f"{float(np.mean(pred_sample)):.4f}")
-            with col3:
-                st.metric("MAE", f"{mae:.4f}")
-            with col4:
-                st.metric("MSE", f"{mse:.4f}")
+            s1, s2, s3, s4 = st.columns(4)
+            with s1:
+                st.metric("历史均值", f"{float(np.mean(hist_sample)):.4f}")
+            with s2:
+                st.metric("未来均值", f"{float(np.mean(true_sample)):.4f}")
+            with s3:
+                st.metric("预测均值", f"{float(np.mean(pred_sample)):.4f}")
+            with s4:
+                st.metric("样本 ID", f"#{sample_id}")
 
-            # ── 历史语境说明 ──
             st.info(
-                f"📌 **历史上下文说明**：波形左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
+                f"📌 **历史上下文说明**：左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
                 "右侧（X ≥ 0）为预测区间。灰色垂直虚线（X=0）为历史与未来的分界线。"
             )
 
-            # 连续多样本对比视图
+            # 多样本批量对比
             st.markdown("### 📊 多样本批量对比视图")
             n_multi = 5
             start_idx = max(0, sample_id - 2)
 
             fig_multi = go.Figure()
-
             colors_true = px.colors.qualitative.Set1[:n_multi]
             colors_pred = px.colors.qualitative.Dark2[:n_multi]
 
             for i in range(n_multi):
                 idx = start_idx + i
-                if idx < len(preds) and idx < len(trues):
-                    p = preds[idx]
-                    t = trues[idx]
+                if (idx < len(history_list)
+                    and idx < len(true_list)
+                    and idx < len(pred_list)):
 
-                    if p.ndim > 1:
-                        p = p[:, 0]
-                    if t.ndim > 1:
-                        t = t[:, 0]
+                    t_raw = np.array(true_list[idx])
+                    p_raw = np.array(pred_list[idx])
 
-                    offset = i * (len(p) + 5)
+                    if true_n_feat > 1:
+                        t_flat = t_raw[:(len(t_raw) // true_n_feat) * true_n_feat]
+                        t = t_flat.reshape(-1, true_n_feat)[:, 0]
+                        p_flat = p_raw[:(len(p_raw) // true_n_feat) * true_n_feat]
+                        p = p_flat.reshape(-1, true_n_feat)[:, 0]
+                    else:
+                        t = t_raw.flatten()
+                        p = p_raw.flatten()
 
+                    offset = i * (len(t) + 5)
                     fig_multi.add_trace(go.Scatter(
-                        x=[x + offset for x in range(len(t))],
-                        y=t.tolist(),
-                        mode='lines',
-                        name=f'真实 #{idx}',
-                        line=dict(color=colors_true[i], width=2),
-                        showlegend=True
+                        x=[x + offset for x in range(len(t))], y=t.tolist(),
+                        mode='lines', name=f'真实 #{idx}',
+                        line=dict(color=colors_true[i], width=2), showlegend=True
                     ))
-
                     fig_multi.add_trace(go.Scatter(
-                        x=[x + offset for x in range(len(p))],
-                        y=p.tolist(),
-                        mode='lines',
-                        name=f'预测 #{idx}',
-                        line=dict(color=colors_pred[i], width=2, dash='dash'),
-                        showlegend=True
+                        x=[x + offset for x in range(len(p))], y=p.tolist(),
+                        mode='lines', name=f'预测 #{idx}',
+                        line=dict(color=colors_pred[i], width=2, dash='dash'), showlegend=True
                     ))
 
             fig_multi.update_layout(
-                title='连续5个样本的预测对比',
-                xaxis_title='时间步 (带偏移)',
+                title='连续 5 个样本的预测对比',
+                xaxis_title='时间步（带偏移）',
                 yaxis_title='值',
                 template='plotly_white',
                 height=350,
-                legend=dict(
-                    orientation='h',
-                    yanchor="bottom",
-                    y=1.15,
-                    xanchor="right",
-                    x=1
-                )
+                legend=dict(orientation='h', yanchor='bottom', y=1.15, xanchor='right', x=1)
             )
-
             st.plotly_chart(fig_multi, width="stretch")
 
         else:
-            st.error(f"样本ID {sample_id} 超出范围 (有效范围: 0-{min(len(preds), len(trues))-1})")
+            st.error(f"样本 ID {sample_id} 超出范围")
+
+    else:
+        # 没有 JSON preview：尝试从 .npy 加载
+        config_params = matching_exp['config'] if matching_exp else None
+        preds, trues, x_test = load_predictions(
+            output_dir, model, seq_len, pred_len, config_params
+        )
+
+        if preds is None or trues is None:
+            st.info("💡 提示: 预测结果文件不存在，请确保已运行相应实验。")
+            st.markdown("### 📋 示例波形展示（模拟数据）")
+
+            n_timesteps = pred_len
+            x_axis = list(range(n_timesteps))
+            true_wave = np.sin(np.linspace(0, 4 * np.pi, n_timesteps)) * 2 \
+                + np.random.randn(n_timesteps) * 0.3
+            if model == 'PatternSearch':
+                pred_wave = true_wave + np.random.randn(n_timesteps) * 0.2
+            elif model == 'LSHSearch':
+                pred_wave = true_wave + np.random.randn(n_timesteps) * 0.4
+            else:
+                pred_wave = true_wave + np.random.randn(n_timesteps) * 0.5
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=true_wave, mode='lines+markers',
+                name='真实值 (Ground Truth)',
+                line=dict(color='#2E86AB', width=2), marker=dict(size=6),
+                hovertemplate='时间点: %{x}<br>真实值: %{y:.4f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=pred_wave, mode='lines+markers',
+                name='预测值 (Prediction)',
+                line=dict(color='#E94F37', width=2, dash='dash'), marker=dict(size=6),
+                hovertemplate='时间点: %{x}<br>预测值: %{y:.4f}<extra></extra>'
+            ))
+            fig.update_layout(
+                title=f'{model} 模型预测效果（示例数据）',
+                xaxis_title='时间步 (Timestep)',
+                yaxis_title='值 (Value)',
+                template='plotly_white',
+                hovermode='x unified',
+                height=450,
+                margin=dict(l=40, r=40, t=60, b=40)
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            # 从 .npy 加载时的连贯波形渲染
+            if sample_id < len(preds) and sample_id < len(trues):
+                pred_s = preds[sample_id]
+                true_s = trues[sample_id]
+                if pred_s.ndim > 1:
+                    pred_s = pred_s[:, 0]
+                if true_s.ndim > 1:
+                    true_s = true_s[:, 0]
+
+                hist_s = None
+                if x_test is not None and sample_id < len(x_test):
+                    h = x_test[sample_id]
+                    hist_s = h[:, 0] if h.ndim > 1 else h.flatten()
+
+                st.markdown(f"### 📈 预测结果波形（样本 #{sample_id}）")
+                fig = go.Figure()
+
+                if hist_s is not None:
+                    fig.add_trace(go.Scatter(
+                        x=list(range(-seq_len, 0)), y=hist_s.tolist(), mode='lines',
+                        name='历史真实 (History)',
+                        line=dict(color='#94C8D8', width=1.8), opacity=0.7,
+                        hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
+                    ))
+
+                fx = list(range(0, len(true_s)))
+                fig.add_trace(go.Scatter(
+                    x=fx, y=true_s.tolist(), mode='lines+markers',
+                    name='未来真实 (Ground Truth)',
+                    line=dict(color='#2E86AB', width=2.5),
+                    marker=dict(size=6, symbol='circle'),
+                    hovertemplate='时间: %{x}<br>真实值: %{y:.4f}<extra></extra>'
+                ))
+                fig.add_trace(go.Scatter(
+                    x=fx, y=pred_s.tolist(), mode='lines+markers',
+                    name='模型预测 (Prediction)',
+                    line=dict(color='#E94F37', width=2.5, dash='dash'),
+                    marker=dict(size=6, symbol='square'),
+                    hovertemplate='时间: %{x}<br>预测值: %{y:.4f}<extra></extra>'
+                ))
+                fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.8)
+
+                mae_v = float(np.mean(np.abs(pred_s - true_s)))
+                mse_v = float(np.mean((pred_s - true_s) ** 2))
+
+                fig.add_trace(go.Scatter(
+                    x=fx + fx[::-1],
+                    y=(pred_s - true_s).tolist() + [0] * len(fx),
+                    fill='toself', fillcolor='rgba(233, 79, 55, 0.12)',
+                    line=dict(color='rgba(255,255,255,0)'),
+                    name='预测误差带', showlegend=True,
+                    hovertemplate='时间: %{x}<br>误差: %{y:.4f}<extra></extra>'
+                ))
+
+                total_x_range = seq_len + len(true_s)
+                fig.update_layout(
+                    title=f'{model} | seq={seq_len} | pred={len(true_s)} | '
+                          f'MAE={mae_v:.4f} | MSE={mse_v:.4f}',
+                    xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
+                    yaxis_title='值',
+                    template='plotly_white',
+                    hovermode='x unified',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    height=500,
+                    margin=dict(l=40, r=40, t=80, b=40),
+                    xaxis=dict(
+                        tickmode='linear', tick0=-seq_len,
+                        dtick=max(1, total_x_range // 12)
+                    )
+                )
+                st.plotly_chart(fig, width="stretch")
+
+                ss1, ss2, ss3, ss4 = st.columns(4)
+                with ss1:
+                    st.metric("真实均值", f"{float(np.mean(true_s)):.4f}")
+                with ss2:
+                    st.metric("预测均值", f"{float(np.mean(pred_s)):.4f}")
+                with ss3:
+                    st.metric("MAE", f"{mae_v:.4f}")
+                with ss4:
+                    st.metric("MSE", f"{mse_v:.4f}")
+
+                st.info(
+                    f"📌 **历史上下文说明**：左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
+                    "右侧（X ≥ 0）为预测区间。灰色垂直虚线（X=0）为历史与未来的分界线。"
+                )
+            else:
+                st.error(f"样本 ID {sample_id} 超出范围")
 
 
 def render_model_introduction():

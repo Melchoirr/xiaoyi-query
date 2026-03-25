@@ -49,24 +49,18 @@ class PatternSearch:
         self.n_features = n_features
 
     def fit(self, X_train: np.ndarray, Y_train: np.ndarray):
-        n_samples = X_train.shape[0]
-
-        if X_train.ndim == 3:
-            self.seq_len = X_train.shape[1]
-            self.n_features = X_train.shape[2]
-            self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
-        else:
-            self.seq_len = X_train.shape[1]
-            self.n_features = 1
-            self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
-
+        # ── 严格捕获真实维度，禁止 n_features=1 残留 ──────────────────
+        self.seq_len = X_train.shape[1]
+        self.pred_len = Y_train.shape[1]
+        # Y 永远决定 n_features：3D -> Y.shape[-1]，2D -> X.shape[-1]（展平前）
         if Y_train.ndim == 3:
-            self.pred_len = Y_train.shape[1]
-            self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
-        else:
-            self.pred_len = Y_train.shape[1]
-            self.n_features = 1
-            self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
+            self.n_features = Y_train.shape[-1]
+        else:  # 2D: Y shape=(n, pred_len), n_features 必须从 X 推导
+            self.n_features = X_train.shape[-1] if X_train.ndim == 3 else 1
+
+        n_samples = X_train.shape[0]
+        self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
+        self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
 
         self._mem_X_t = torch.from_numpy(self.memory_X).to(
             self.device, dtype=torch.float32

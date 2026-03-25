@@ -175,19 +175,18 @@ class LSHSearch:
     # ─────────────────────────────────────────────────────────
 
     def fit(self, X_train: np.ndarray, Y_train: np.ndarray):
+        # ── 严格捕获真实维度，禁止 n_features=1 残留 ──────────────────
+        self.seq_len = X_train.shape[1]
+        self.pred_len = Y_train.shape[1]
+        self.n_features = Y_train.shape[-1] if Y_train.ndim == 3 else 1
+
         n_samples = X_train.shape[0]
 
         if X_train.ndim == 3:
-            n_samples, seq_len, n_features = X_train.shape
             X_flat = X_train.reshape(n_samples, -1).astype(self.DTYPE)
             Y_original = Y_train.astype(self.DTYPE)
         else:
             X_flat = X_train.astype(self.DTYPE)
-            n_features = 1
-            Y_original = Y_train.astype(self.DTYPE)
-
-        if self.n_features <= 0:
-            self.n_features = 1
             Y_original = Y_train.astype(self.DTYPE)
 
         X_norm, _, _ = self._instance_normalize(X_flat)

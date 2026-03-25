@@ -86,10 +86,13 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验
 
-    v2.4 核心变更：
-    1. TSLib 指标对齐：Metrics 在归一化空间（inverse_transform 之前）计算
-    2. DLinear-style Instance Normalization（Mean-Shift）：训练/预测阶段均安全应用
-    3. Metrics 计算时机：先在归一化空间算指标 -> 再 inverse_transform -> 最后落盘
+    v2.5 核心变更：
+    1. TSLib Y 截断：强制 Y_train/Y_test = Y[:, -pred_len:, :]
+    2. mean_shift 开关：仅当 args.mean_shift=True 时启用 DLinear-style Mean-Shift
+    3. Metrics 计算时机：始终在归一化空间（inverse_transform 之前）直接对 Y_pred/Y_test 计算
+       —— 与 TSLib 标准 0.3 量级对齐
+    4. 历史数据落盘：inverse_transform 后，将截断前 100 条 X_test 原值存入
+       JSON preview['history']，供 Dashboard 连贯波形绘制使用
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -99,12 +102,12 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     model_name = config['model_name']
     seq_len = config['seq_len']
     pred_len = config['pred_len']
+    use_mean_shift = config.get('mean_shift', False)
 
     try:
         import_models()
         ModelClass = MODEL_REGISTRY[model_name]['class']
 
-        # 构建模型参数（全部通过 kwargs 安全传递）
         model_params = {}
         for param in MODEL_REGISTRY[model_name]['params']:
             model_params[param] = config.get(param, _get_default(param))
@@ -115,9 +118,8 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         if use_gpu and device == 'cpu':
             logger.warning(f"[{model_name}] 请求 GPU 但 torch.cuda 不可用，已回退 CPU")
         model_params['device'] = device
-        logger.info(f"[{model_name}] 计算设备: {device}")
+        logger.info(f"[{model_name}] 计算设备: {device}, mean_shift={use_mean_shift}")
 
-        # 创建参数对象
         class Args:
             pass
         args = Args()
@@ -128,89 +130,102 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         args.features = config.get('features', 'M')
         args.target = config.get('target', 'OT')
 
-        # 加载数据（float32）
         logger.info(f"[{model_name}] 加载数据 seq={seq_len} pred={pred_len}")
         train_set, val_set, test_set = get_data(args)
         X_train, Y_train = get_X_Y_from_dataset(train_set)
         X_test, Y_test = get_X_Y_from_dataset(test_set)
 
-        logger.info(f"[{model_name}] 数据就绪: X_train={X_train.shape}, X_test={X_test.shape}")
+        logger.info(f"[{model_name}] 原始数据: X_train={X_train.shape}, Y_train={Y_train.shape}, "
+                    f"X_test={X_test.shape}, Y_test={Y_test.shape}")
 
-        # 释放数据集对象
-        del train_set, val_set
-        gc.collect()
+        # ── 任务二（核心）：TSLib Y 截断 ──────────────────────────────
+        # TSLib Dataloader 返回的 Y 包含 label_len + pred_len，
+        # 必须强制截取最后 pred_len 个时间步，绝不允许残留 label_len 段。
+        if Y_train.ndim == 3:
+            Y_train = Y_train[:, -pred_len:, :]
+        elif Y_train.ndim == 2:
+            Y_train = Y_train[:, -pred_len:]
 
-        # ============================================================
-        # 任务二（核心）：DLinear-style Instance Normalization（Mean-Shift）
-        #
-        #  DLinear 论文公式：
-        #    X_norm = X - mean(X, axis=1)           <- 按样本去均值
-        #    Y_norm = Y - mean(X, axis=1)           <- Y 也减去 X 的均值
-        #    model.fit(X_norm, Y_norm)
-        #    pred_norm = model.predict(X_test_norm)
-        #    pred = pred_norm + mean(X_test, axis=1)
-        #
-        #  安全性：keepdims=True 确保 shape (n, 1, feat) 可广播到 (n, seq/pred, feat)
-        #          强制 reshape 到 3D 消除 2D 残留导致广播错误
-        # ============================================================
+        if Y_test.ndim == 3:
+            Y_test = Y_test[:, -pred_len:, :]
+        elif Y_test.ndim == 2:
+            Y_test = Y_test[:, -pred_len:]
 
-        # 训练阶段：Mean-Shift
+        logger.info(f"[{model_name}] Y 截断后: Y_train={Y_train.shape}, Y_test={Y_test.shape}")
+
+        # ── 训练阶段：Mean-Shift（仅当开关打开时）────────────────────
+        # 3D 化（统一为 (n, seq/pred, n_feat)，便于广播）
         X_train_3d = X_train.reshape(X_train.shape[0], seq_len, -1) \
             if X_train.ndim == 2 else X_train.astype(np.float32)
         Y_train_3d = Y_train.reshape(Y_train.shape[0], pred_len, -1) \
             if Y_train.ndim == 2 else Y_train.astype(np.float32)
 
-        X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)       # (n_train, 1, n_feat)
-        X_train_centered = (X_train_3d - X_train_mean).astype(np.float32)
-        Y_train_centered = (Y_train_3d - X_train_mean).astype(np.float32)
+        # 保存截断前 100 条 X_test 原始值（Dashboard 连贯波形用）
+        exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
+        MAX_PREVIEW = 100
+        history_preview = X_test[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
 
-        logger.info(f"[{model_name}] Mean-Shift 训练: X_mean={X_train_mean.shape}")
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
+                X_test.astype(np.float32))
+
+        del train_set, val_set
+        gc.collect()
+
+        if use_mean_shift:
+            # DLinear-style：X 和 Y 均减去输入序列的均值
+            X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)
+            X_train_centered = (X_train_3d - X_train_mean).astype(np.float32)
+            Y_train_centered = (Y_train_3d - X_train_mean).astype(np.float32)
+            logger.info(f"[{model_name}] Mean-Shift 训练: X_mean={X_train_mean.shape}")
+        else:
+            X_train_centered = X_train_3d.astype(np.float32)
+            Y_train_centered = Y_train_3d.astype(np.float32)
+            logger.info(f"[{model_name}] 标准训练（无 Mean-Shift）")
 
         del X_train, Y_train
         gc.collect()
 
-        logger.info(f"[{model_name}] 训练 (mean-shift 模式)...")
+        logger.info(f"[{model_name}] 训练中...")
         model = ModelClass(**model_params)
         model.fit(X_train_centered, Y_train_centered)
 
-        del X_train_3d, Y_train_3d, X_train_centered, Y_train_centered, X_train_mean
+        del X_train_3d, Y_train_3d, X_train_centered, Y_train_centered
+        if use_mean_shift:
+            del X_train_mean
         gc.collect()
 
-        # 预测阶段：Mean-Shift
+        # ── 预测阶段 ───────────────────────────────────────────────
         X_test_3d = X_test.reshape(X_test.shape[0], seq_len, -1) \
             if X_test.ndim == 2 else X_test.astype(np.float32)
         Y_test_3d = Y_test.reshape(Y_test.shape[0], pred_len, -1) \
             if Y_test.ndim == 2 else Y_test.astype(np.float32)
 
-        X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)         # (n_test, 1, n_feat)
-        X_test_centered = (X_test_3d - X_test_mean).astype(np.float32)
-
-        # 落盘 X_test 原始（Dashboard 历史语境）
-        exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
-                X_test.astype(np.float32))
+        if use_mean_shift:
+            X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)
+            X_test_centered = (X_test_3d - X_test_mean).astype(np.float32)
+            logger.info(f"[{model_name}] Mean-Shift 推理...")
+        else:
+            X_test_centered = X_test_3d.astype(np.float32)
 
         del X_test
         gc.collect()
 
-        # 预测（中心化空间）
-        logger.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本 (mean-shift 模式)...")
-        Y_pred_centered = model.predict(X_test_centered)                 # (n_test, pred_len, n_feat)
+        logger.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本...")
+        Y_pred_centered = model.predict(X_test_centered)
 
         del model, X_test_centered
         gc.collect()
 
-        # 反中心化：Y_pred = Y_pred_centered + X_test_mean
-        Y_pred = (Y_pred_centered + X_test_mean).astype(np.float32)     # (n_test, pred_len, n_feat)
-        del Y_pred_centered, X_test_mean
+        if use_mean_shift:
+            Y_pred = (Y_pred_centered + X_test_mean).astype(np.float32)
+            del Y_pred_centered, X_test_mean
+        else:
+            Y_pred = Y_pred_centered.astype(np.float32)
+            del Y_pred_centered
         gc.collect()
 
-        # ============================================================
-        # 任务一（核心）：在归一化空间计算 Metrics（TSLib 规范）
-        #
-        #  Y_pred 和 Y_test_3d 此时都在 StandardScaler 的归一化空间内，
-        #  与 TSLib 论文中的指标（0.3/0.4 量级）对齐。
-        # ============================================================
+        # ── 任务二（核心）：指标在归一化空间直接计算 ──────────────────
+        # Y_pred 和 Y_test_3d 此时都是归一化状态，指标量级与 TSLib 对齐（≈0.3）
         metrics = calculate_all_metrics(Y_pred, Y_test_3d)
 
         elapsed = time.time() - start_time
@@ -219,7 +234,6 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
 
         # inverse_transform（仅用于落盘和 Dashboard 可视化）
         n_test, p_len, n_feat = Y_pred.shape
-
         Y_pred_flat = Y_pred.reshape(-1, n_feat)
         Y_test_flat = Y_test_3d.reshape(-1, n_feat)
 
@@ -236,8 +250,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig)
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig)
 
-        # JSON preview（仅前 100 条）
-        MAX_PREVIEW = 100
+        # JSON preview（前 100 条 preds / trues / history）
         preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
         preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
 
@@ -252,6 +265,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             'preview': {
                 'preds': preview_pred,
                 'trues': preview_true,
+                'history': history_preview,
                 'count': min(len(preview_pred), len(preview_true))
             },
             'npy_file': {
@@ -387,6 +401,7 @@ class ExperimentRunner:
             cfg['features'] = self.args.features
             cfg['target'] = self.args.target
             cfg['use_gpu'] = getattr(self.args, 'use_gpu', False)
+            cfg['mean_shift'] = getattr(self.args, 'mean_shift', False)
 
         return configs
 
@@ -629,6 +644,8 @@ def parse_args():
                        help='并行进程数（最大 4）')
     parser.add_argument('--use_gpu', action='store_true',
                        help='若 torch.cuda 可用则在 GPU 上做张量距离/投影（PatternSearch/LSH/SAX）')
+    parser.add_argument('--mean_shift', action='store_true',
+                       help='启用 DLinear-style Mean-Shift（去均值）：训练/推理阶段均减去输入序列均值')
 
     return parser.parse_args()
 
