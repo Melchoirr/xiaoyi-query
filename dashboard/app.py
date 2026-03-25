@@ -2,17 +2,17 @@
 Streamlit 交互式可视化仪表盘
 用于对比三种时序预测基线模型的性能
 
-v2.8 变更：
-- 波形量纲对齐：preview trues 改用归一化值，history/trues/preds 三者量纲统一
-- 双尺度切换：st.checkbox 切换「归一化尺度」/「原始物理尺度」
-- 归一化切换时前端动态计算：(X - X_mean) / X_std，命中时用 X_test 均值/标准差
-- 彻底解决缓存脏读：移除 @st.cache_data，显式 st.cache_data.clear()
-- 特征维度选择器：支持 ETT 预定义特征名称（OT/HUFL/HUFL/...），末列标注 (Target)
+v2.9 变更：
+- 全物理尺度落盘：run.py 将 history/trues/preds 全部 inverse_transform 为原始物理尺度后
+  存入 JSON preview，Dashboard 直接绘制，不做任何前端归一化处理
+- 彻底解决缓存脏读：移除 @st.cache_data，subprocess 后 time.sleep(1) + cache_data.clear() + rerun()
+- 特征维度选择器：支持 ETT 预定义特征名称（OT/HUFL/HULL/...），末列标注 (Target)
 """
 
 import os
 import sys
 import json
+import time
 from typing import Dict, List, Any, Optional
 
 import streamlit as st
@@ -81,16 +81,6 @@ st.markdown("""
         margin-top: 0.25rem;
         white-space: nowrap;
     }
-    .scale-badge {
-        display: inline-block;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        font-weight: bold;
-        color: white;
-    }
-    .scale-normalized { background: linear-gradient(135deg, #667eea, #764ba2); }
-    .scale-original  { background: linear-gradient(135deg, #11998e, #38ef7d); }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
@@ -110,9 +100,9 @@ def _feature_display_name(idx: int, n_features: int) -> str:
     """返回特征的展示名称（含 Target 标注）"""
     if idx < len(ETT_FEATURE_NAMES) and n_features == len(ETT_FEATURE_NAMES):
         name = ETT_FEATURE_NAMES[idx]
-        label = f"特征 {idx}: {name}"
+        label = "特征 " + str(idx) + ": " + name
     else:
-        label = f"特征 {idx}"
+        label = "特征 " + str(idx)
     if idx == n_features - 1 and n_features > 1:
         label += " (Target)"
     return label
@@ -142,15 +132,17 @@ def _get_prediction_filename(
     dataset_name = 'ETTm1'
     if model_name == 'PatternSearch':
         top_k = (config.get('top_k', 5) or 5) if config else 5
-        return f"{dataset_name}_seq{seq_len}_pred{pred_len}_k{top_k}"
+        return dataset_name + "_seq" + str(seq_len) + "_pred" + str(pred_len) + "_k" + str(top_k)
     elif model_name == 'LSHSearch':
         n_hash = (config.get('n_hash_funcs', 16) or 16) if config else 16
         n_tables = (config.get('n_tables', 4) or 4) if config else 4
-        return f"{dataset_name}_seq{seq_len}_pred{pred_len}_lsh_h{n_hash}_t{n_tables}"
+        return dataset_name + "_seq" + str(seq_len) + "_pred" + str(pred_len) \
+            + "_lsh_h" + str(n_hash) + "_t" + str(n_tables)
     else:
         word_size = (config.get('word_size', 8) or 8) if config else 8
         alpha = (config.get('alphabet_size', 8) or 8) if config else 8
-        return f"{dataset_name}_seq{seq_len}_pred{pred_len}_sax_w{word_size}_a{alpha}"
+        return dataset_name + "_seq" + str(seq_len) + "_pred" + str(pred_len) \
+            + "_sax_w" + str(word_size) + "_a" + str(alpha)
 
 
 def load_predictions(
@@ -158,9 +150,9 @@ def load_predictions(
     pred_len: int, config: dict = None
 ) -> tuple:
     exp_id = _get_prediction_filename(model_name, seq_len, pred_len, config)
-    preds_path = os.path.join(output_dir, f"{exp_id}_preds.npy")
-    trues_path = os.path.join(output_dir, f"{exp_id}_trues.npy")
-    x_test_path = os.path.join(output_dir, f"{exp_id}_X_test.npy")
+    preds_path = os.path.join(output_dir, exp_id + "_preds.npy")
+    trues_path = os.path.join(output_dir, exp_id + "_trues.npy")
+    x_test_path = os.path.join(output_dir, exp_id + "_X_test.npy")
 
     preds = np.load(preds_path) if os.path.exists(preds_path) else None
     trues = np.load(trues_path) if os.path.exists(trues_path) else None
@@ -187,8 +179,8 @@ def _restore_feature_flat(
     """
     从 JSON preview 展平数据中提取指定特征列
 
-    preview['history'] = X_test[:100].reshape(100, -1)  # 展平为 (100, seq_len * n_feat)
-    preview['trues'] / 'preds' = 展平为 (100, pred_len * n_feat)
+    preview['history'] = shape (100, seq_len * n_feat) 的展平列表
+    preview['trues'] / 'preds' = shape (100, pred_len * n_feat) 的展平列表
 
     Returns:
         shape (seq_len,) 或 (pred_len,) 的 1D 数组
@@ -210,32 +202,6 @@ def _extract_feature_from_npy(data: np.ndarray, feat_idx: int) -> np.ndarray:
             return data[:, feat_idx]
         return data.flatten()
     return data.flatten()
-
-
-def _frontend_normalize(
-    seq: np.ndarray,
-    hist_seq: np.ndarray,
-) -> tuple:
-    """
-    前端归一化（任务一：双尺度切换核心）
-
-    当用户勾选「归一化尺度」时：
-      利用 history 序列（归一化后的连贯数据）计算样本级均值/标准差，
-      对 history / trues / preds 统一执行 (X - mean) / (std + 1e-8) 归一化。
-
-    Args:
-        seq: 历史/未来序列，shape (n_steps,)
-        hist_seq: 同一批的历史序列，shape (seq_len,)，用于计算统计量
-
-    Returns:
-        (seq_normalized, mean, std)
-    """
-    mean_val = np.mean(hist_seq)
-    std_val = np.std(hist_seq)
-    if std_val < 1e-5:
-        std_val = 1.0
-    seq_norm = (seq - mean_val) / std_val
-    return seq_norm, mean_val, std_val
 
 
 # ============================================================
@@ -274,11 +240,11 @@ def render_metrics_html(
     """用 display:flex HTML 卡片渲染 5 个指标，强制单行排布"""
     st.markdown(
         METRIC_CARDS_HTML.format(
-            mae=f"{mae:.4f}",
-            mse=f"{mse:.4f}",
-            rmse=f"{rmse:.4f}",
-            mape=f"{mape:.4f}",
-            corr=f"{corr:.4f}",
+            mae="%.4f" % mae,
+            mse="%.4f" % mse,
+            rmse="%.4f" % rmse,
+            mape="%.4f" % mape,
+            corr="%.4f" % corr,
         ),
         unsafe_allow_html=True
     )
@@ -303,7 +269,8 @@ def render_sidebar() -> Dict[str, Any]:
     """
     侧边栏（含 expander 表单 + 特征维度选择器 + 动态 Sample ID 范围）
 
-    任务二：表单提交后显式调用 st.cache_data.clear() + st.rerun() 确保读取最新 JSON
+    任务二：表单提交后 time.sleep(1) + st.cache_data.clear() + st.rerun()
+             确保文件系统写入延迟和 Streamlit 缓存脏读问题彻底解决
     """
     st.sidebar.markdown("## ⚙️ 配置选项")
 
@@ -461,9 +428,12 @@ def render_sidebar() -> Dict[str, Any]:
                         if process.returncode == 0:
                             spinner_ph.success("✅ 实验完成！")
                             st.success("✅ 实验完成！正在刷新页面...")
-                            # 任务二（关键）：进程结束后显式清除所有 Streamlit 缓存
-                            # 确保下次 load_experiment_log() 强制读文件系统
-                            st.cache_data.clear()
+                            # 任务二（关键）：等待文件系统写入 + 清除所有缓存 + 强制重载
+                            time.sleep(1)
+                            try:
+                                st.cache_data.clear()
+                            except Exception:
+                                pass
                             st.rerun()
                         else:
                             spinner_ph.error(
@@ -489,8 +459,7 @@ def render_sidebar() -> Dict[str, Any]:
             'selected_model': None, 'selected_pred_len': None,
             'selected_seq_len': None, 'selected_sample_id': 0,
             'experiments': [], 'max_preview_count': 100,
-            'n_features': 1, 'selected_feature_idx': 0,
-            'show_normalized': False
+            'n_features': 1, 'selected_feature_idx': 0
         }
 
     st.sidebar.success("✅ 实验日志已加载")
@@ -517,8 +486,7 @@ def render_sidebar() -> Dict[str, Any]:
             'selected_model': None, 'selected_pred_len': None,
             'selected_seq_len': None, 'selected_sample_id': 0,
             'experiments': experiments, 'max_preview_count': 100,
-            'n_features': 1, 'selected_feature_idx': 0,
-            'show_normalized': False
+            'n_features': 1, 'selected_feature_idx': 0
         }
 
     selected_model = st.sidebar.selectbox(
@@ -564,18 +532,6 @@ def render_sidebar() -> Dict[str, Any]:
     default_feat_idx = max(0, n_features - 1)
     feat_labels = [_feature_display_name(i, n_features) for i in feat_options]
 
-    # 任务一：双尺度切换开关（session_state 持久化）
-    if 'show_normalized' not in st.session_state:
-        st.session_state['show_normalized'] = False
-
-    show_normalized = st.sidebar.checkbox(
-        "显示归一化尺度 (Normalized Scale)",
-        value=st.session_state['show_normalized'],
-        help="勾选后对 history/trues/preds 统一执行 (X-mean)/std 归一化，"
-             "便于观察预测误差在标准化空间的形态。取消勾选则显示原始物理尺度。"
-    )
-    st.session_state['show_normalized'] = show_normalized
-
     selected_feature_idx = st.sidebar.selectbox(
         "选择展示的特征维度",
         options=feat_options,
@@ -616,8 +572,7 @@ def render_sidebar() -> Dict[str, Any]:
         'selected_feature_idx': selected_feature_idx,
         'n_features': n_features,
         'experiments': experiments,
-        'max_preview_count': max_preview_count,
-        'show_normalized': show_normalized
+        'max_preview_count': max_preview_count
     }
 
 
@@ -738,10 +693,13 @@ def _build_waveform_figure(
     hist_x: List[int], hist_y: List[float],
     future_x: List[int], true_y: List[float], pred_y: List[float],
     model: str, seq_len: int, pred_len_actual: int,
-    mae: float, mse: float, scale_label: str,
+    mae: float, mse: float,
     feat_label: str, sample_id: int
 ) -> go.Figure:
-    """构建波形图的公共逻辑：三条曲线 + 分隔线 + 误差带 + zeroline"""
+    """
+    构建波形图：三条曲线 + x=0 分隔线 + 误差带 + zeroline
+    所有数据均为原始物理尺度，无任何前端归一化处理
+    """
     fig = go.Figure()
 
     # 历史（gray 浅灰）
@@ -785,14 +743,12 @@ def _build_waveform_figure(
     ))
 
     total_x_range = seq_len + pred_len_actual
+    title = model + " | seq=" + str(seq_len) + " | pred=" + str(pred_len_actual) \
+        + " | " + feat_label + " | MAE=" + "%.4f" % mae + " | MSE=" + "%.4f" % mse
     fig.update_layout(
-        title=(
-            model + ' | seq=' + str(seq_len) + ' | pred=' + str(pred_len_actual)
-            + ' | ' + feat_label + ' | ' + scale_label
-            + ' | MAE=' + f"{mae:.4f}" + ' | MSE=' + f"{mse:.4f}"
-        ),
+        title=title,
         xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
-        yaxis_title='值',
+        yaxis_title='值（原始物理尺度）',
         template='plotly_white',
         hovermode='x unified',
         legend=dict(
@@ -819,8 +775,8 @@ def render_waveform_comparison(
     """
     渲染微观波形对比
 
-    任务一：双尺度切换——show_normalized 控制是否对 history/trues/preds 统一归一化
-    任务三：特征名称使用 _feature_display_name 生成
+    全物理尺度：history/trues/preds 全部由 run.py inverse_transform 后存入 JSON，
+    Dashboard 直接绘制，不做任何前端计算，确保量纲完全一致。
     """
     st.markdown("---")
     st.markdown("## 🔍 微观波形探查 (Case Study)")
@@ -837,30 +793,13 @@ def render_waveform_comparison(
     output_dir = config.get('output_dir', './results')
     feat_idx = config.get('selected_feature_idx', 0)
     n_features_total = config.get('n_features', 1)
-    show_normalized = config.get('show_normalized', False)
 
     if model is None or pred_len is None or seq_len is None:
         st.info("💡 请从侧边栏选择模型和参数后查看波形。")
         return
 
     feat_label = _feature_display_name(feat_idx, n_features_total)
-    scale_label = "归一化尺度" if show_normalized else "原始物理尺度"
-    scale_color = (
-        "linear-gradient(135deg, #667eea, #764ba2)"
-        if show_normalized else "linear-gradient(135deg, #11998e, #38ef7d)"
-    )
-
     is_multi_feat = n_features_total > 1
-
-    # 尺度切换提示条
-    st.markdown(
-        '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">'
-        + '<span style="font-size:0.85rem;color:#555;">当前尺度：</span>'
-        + '<span class="scale-badge" style="background:' + scale_color + ';">'
-        + scale_label + '</span>'
-        + '</div>',
-        unsafe_allow_html=True
-    )
 
     st.markdown(
         '<div class="info-panel">'
@@ -868,6 +807,7 @@ def render_waveform_comparison(
         + ' | seq_len=' + str(seq_len) + ' | pred_len=' + str(pred_len)
         + ' | 样本 #' + str(sample_id)
         + ' | ' + feat_label
+        + ' | 原始物理尺度'
         + '</div>',
         unsafe_allow_html=True
     )
@@ -897,19 +837,13 @@ def render_waveform_comparison(
     st.markdown("")
 
     if is_multi_feat:
-        revin_mode = ""
-        if matching_exp and 'preview' in matching_exp:
-            revin_mode = " (RevIN 已启用)" if matching_exp['preview'].get(
-                'use_revin', False
-            ) else ""
         st.info(
             "📌 **多变量 (M) 模式**：数据包含 " + str(n_features_total)
             + " 个特征变量。当前展示 **" + feat_label + "**。"
-            + revin_mode
-            + " 取消勾选「显示归一化尺度」可切回原始物理尺度。"
+            "可通过侧边栏「选择展示的特征维度」切换其他特征。"
         )
 
-    # ── 从 JSON preview 读取连贯波形数据 ─────────────────────
+    # ── 从 JSON preview 读取连贯波形数据（全物理尺度）──────────
     preview = (
         matching_exp.get('preview') if matching_exp else None
     )
@@ -927,7 +861,7 @@ def render_waveform_comparison(
             and sample_id < len(true_list)
             and sample_id < len(pred_list)):
 
-            # 提取指定特征列
+            # 提取指定特征列（无任何归一化处理）
             hist_sample = _restore_feature_flat(
                 np.array(history_list[sample_id]),
                 n_features_total, seq_len, feat_idx
@@ -941,23 +875,10 @@ def render_waveform_comparison(
                 n_features_total, pred_len, feat_idx
             )
 
-            # 任务一（双尺度切换核心）：
-            # preview['trues'] 已与 history 量纲一致（均为归一化值），
-            # 若 show_normalized=True 则前端再次归一化（三者均以 history 为基准）
-            if show_normalized:
-                true_sample, m_v, s_v = _frontend_normalize(
-                    true_sample, hist_sample
-                )
-                pred_sample, _, _ = _frontend_normalize(
-                    pred_sample, hist_sample
-                )
-                # history 自身（已是归一化值）可选择保持不变或也归一化
-                # 这里保持不变以保留"原始归一化"形态
-
-            # 连贯波形
+            # 连贯波形（原始物理尺度，直接绘制）
             st.markdown(
                 "### 📈 连贯波形（样本 #" + str(sample_id)
-                + " | " + feat_label + " | " + scale_label + "）"
+                + " | " + feat_label + "）"
             )
 
             hist_x = list(range(-seq_len, 0))
@@ -967,18 +888,18 @@ def render_waveform_comparison(
                 hist_x, hist_sample.tolist(),
                 future_x, true_sample.tolist(), pred_sample.tolist(),
                 model, seq_len, len(true_sample),
-                mae, mse, scale_label, feat_label, sample_id
+                mae, mse, feat_label, sample_id
             )
             st.plotly_chart(fig, width="stretch")
 
             # 数值统计
             s1, s2, s3, s4 = st.columns(4)
             with s1:
-                st.metric("历史均值", f"{float(np.mean(hist_sample)):.4f}")
+                st.metric("历史均值", "%.4f" % float(np.mean(hist_sample)))
             with s2:
-                st.metric("未来均值", f"{float(np.mean(true_sample)):.4f}")
+                st.metric("未来均值", "%.4f" % float(np.mean(true_sample)))
             with s3:
-                st.metric("预测均值", f"{float(np.mean(pred_sample)):.4f}")
+                st.metric("预测均值", "%.4f" % float(np.mean(pred_sample)))
             with s4:
                 st.metric("样本 ID", "#" + str(sample_id))
 
@@ -1005,10 +926,6 @@ def render_waveform_comparison(
                         n_features_total, pred_len, feat_idx
                     )
 
-                    if show_normalized:
-                        t_s, _, _ = _frontend_normalize(t_s, t_s)
-                        p_s, _, _ = _frontend_normalize(p_s, t_s)
-
                     offset = i * (len(t_s) + 5)
                     fig_multi.add_trace(go.Scatter(
                         x=[x + offset for x in range(len(t_s))],
@@ -1026,7 +943,7 @@ def render_waveform_comparison(
                     ))
 
             fig_multi.update_layout(
-                title='连续 5 个样本的预测对比（' + feat_label + ' | ' + scale_label + '）',
+                title='连续 5 个样本的预测对比（' + feat_label + '）',
                 xaxis_title='时间步（带偏移）',
                 yaxis_title='值',
                 template='plotly_white',
@@ -1045,7 +962,7 @@ def render_waveform_comparison(
             st.error("样本 ID " + str(sample_id) + " 超出范围")
 
     else:
-        # 无 JSON preview：从 .npy 加载
+        # 无 JSON preview：从 .npy 加载（全物理尺度）
         config_params = (
             matching_exp['config'] if matching_exp else None
         )
@@ -1113,23 +1030,9 @@ def render_waveform_comparison(
                     )
                     hist_s = h.flatten() if h.ndim > 1 else h
 
-                if show_normalized and hist_s is not None:
-                    true_s_norm, _, _ = _frontend_normalize(
-                        true_s.flatten()
-                        if true_s.ndim > 1 else true_s,
-                        hist_s
-                    )
-                    pred_s_norm, _, _ = _frontend_normalize(
-                        pred_s.flatten()
-                        if pred_s.ndim > 1 else pred_s,
-                        hist_s
-                    )
-                    true_s = true_s_norm
-                    pred_s = pred_s_norm
-
                 st.markdown(
                     "### 📈 预测结果波形（样本 #" + str(sample_id)
-                    + " | " + feat_label + " | " + scale_label + "）"
+                    + " | " + feat_label + "）"
                 )
                 fig = go.Figure()
 
@@ -1188,14 +1091,14 @@ def render_waveform_comparison(
 
                 fig.update_layout(
                     title=(
-                        model + ' | seq=' + str(seq_len)
-                        + ' | pred=' + str(len(true_arr))
-                        + ' | ' + feat_label + ' | ' + scale_label
-                        + ' | MAE=' + f"{mae_v:.4f}"
-                        + ' | MSE=' + f"{mse_v:.4f}"
+                        model + " | seq=" + str(seq_len)
+                        + " | pred=" + str(len(true_arr))
+                        + " | " + feat_label
+                        + " | MAE=" + "%.4f" % mae_v
+                        + " | MSE=" + "%.4f" % mse_v
                     ),
                     xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
-                    yaxis_title='值',
+                    yaxis_title='值（原始物理尺度）',
                     template='plotly_white',
                     hovermode='x unified',
                     legend=dict(
@@ -1217,13 +1120,13 @@ def render_waveform_comparison(
 
                 ss1, ss2, ss3, ss4 = st.columns(4)
                 with ss1:
-                    st.metric("真实均值", f"{float(np.mean(true_arr)):.4f}")
+                    st.metric("真实均值", "%.4f" % float(np.mean(true_arr)))
                 with ss2:
-                    st.metric("预测均值", f"{float(np.mean(pred_arr)):.4f}")
+                    st.metric("预测均值", "%.4f" % float(np.mean(pred_arr)))
                 with ss3:
-                    st.metric("MAE", f"{mae_v:.4f}")
+                    st.metric("MAE", "%.4f" % mae_v)
                 with ss4:
-                    st.metric("MSE", f"{mse_v:.4f}")
+                    st.metric("MSE", "%.4f" % mse_v)
             else:
                 st.error("样本 ID " + str(sample_id) + " 超出范围")
 

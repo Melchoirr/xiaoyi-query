@@ -8,25 +8,21 @@
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
 ```
 
-## 重要更新 (v2.8 波形量纲对齐 + 双尺度切换)
+## 重要更新 (v2.9 全物理尺度落盘 + 彻底解决缓存脏读)
 
-v2.8 / v2.7 对齐 TSLib 指标尺度 + RevIN + Dashboard UI 升级：
+v2.9 / v2.8 对齐 TSLib 指标尺度 + 全物理尺度 Dashboard UI：
 
 | 变更类型 | 变更内容 |
 |---------|---------|
-| **波形量纲对齐（v2.8 新增）** | preview `trues` 改用归一化值，与 `history` / `preds` 三者量纲统一，彻底解决历史波形与未来波形不在同一尺度的问题 |
-| **双尺度切换（v2.8 新增）** | `st.checkbox("显示归一化尺度")` 控制是否前端动态归一化；勾选后用 `(X - X_mean) / X_std` 统一 history/trues/preds，以 history 为基准计算统计量 |
-| **彻底解决缓存脏读（v2.8 新增）** | 移除 `@st.cache_data`，每次直接读文件系统；`subprocess.Popen` 完成后显式 `st.cache_data.clear()` + `st.rerun()` |
-| **特征维度选择器（v2.7 新增）** | 动态下拉框切换任意特征列；支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
+| **全物理尺度落盘（v2.9 新增）** | preview `history / trues / preds` 三路数据全部通过 `inverse_transform` 转回原始物理尺度后存入 JSON，彻底消除量纲错位；Dashboard 直接绘制，无需前端归一化处理 |
+| **彻底解决缓存脏读（v2.9 新增）** | `subprocess.wait()` 后加 `time.sleep(1)` 等待文件系统落盘，再 `st.cache_data.clear()` + `st.rerun()` |
+| **UnboundLocalError 修复（v2.9 新增）** | 预测阶段初始化兜底变量 `X_test_mean=np.zeros / X_test_std=np.ones`，避免 `use_revin=False` 分支下变量未定义；删除 `del X_train_mean/X_train_std` 条件分支 |
+| **波形量纲对齐（v2.8 新增）** | preview `trues` 改用归一化值，与 `history` / `preds` 量纲统一 |
+| **特征维度选择器（v2.7 新增）** | 动态下拉框，支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
 | **HTML flex 单行指标（v2.7 新增）** | `display: flex` 替代 `st.columns()`，跨屏幕绝对单行 |
-| **Plotly zeroline（v2.7 新增）** | 所有图表 Y 轴 `zeroline=True, zerolinecolor='lightgray'`，波形穿越 0 轴清晰可见 |
+| **Plotly zeroline（v2.7 新增）** | 所有图表 Y 轴 `zeroline=True, zerolinecolor='lightgray'` |
 | **RevIN 数值安全（v2.7 新增）** | `std < 1e-5` 时强制置 1.0，避免常量序列/方差极小数据除零放大 |
 | **RevIN（可逆实例归一化）** | `--revin` 开关：训练 `(X-mean)/std`，推理 `Y_pred*std+mean`，SOTA 指标量级 |
-| **Mean-Shift → RevIN** | 原 `--mean_shift` 已升级为完整 `--revin`，去均值版本已废弃 |
-| **TSLib Y 截断** | 强制 `Y = Y[:, -pred_len:, :]` 消除 `label_len + pred_len` 残留干扰 |
-| **表单 expander** | 侧边栏表单折叠 `expanded=False`，节省主视图空间 |
-| **实时 Log + 自动刷新** | `subprocess.Popen` + `iter(stdout.readline)` 实时打屏；`st.rerun()` 自动刷新加载最新结果 |
-| **评估指标** | MAPE/MSPE 移除 `*100`；新增 RSE、CORR；全部 `float()` 包裹防 JSON 序列化 |
 
 ## 使用方法
 
@@ -216,18 +212,14 @@ python run.py --skip_run --dashboard
 
 | 功能 | 说明 |
 |------|------|
-| **双尺度切换（v2.8 新增）** | `st.checkbox` 切换「原始物理尺度」/「归一化尺度」；归一化时以 history 为基准动态计算均值/标准差 |
-| **波形量纲对齐（v2.8 新增）** | preview trues 改用归一化值，history/trues/preds 三者量纲统一，图表左右连贯 |
-| **彻底解决缓存脏读（v2.8 新增）** | 移除 `@st.cache_data`；`subprocess` 完成后 `st.cache_data.clear()` + `st.rerun()` |
-| **特征维度选择器（v2.7 新增）** | 动态下拉框，支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
+| **全物理尺度绘图（v2.9 新增）** | JSON preview 三路数据全部 inverse_transform 为原始物理尺度，Dashboard 直接绘制，无前端计算 |
+| **彻底解决缓存脏读（v2.9 新增）** | `time.sleep(1)` + `st.cache_data.clear()` + `st.rerun()` 三连保障 |
+| **特征维度选择器** | 动态下拉框，支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
 | **HTML flex 单行指标** | `display: flex` 替代 `st.columns()`，跨屏幕绝对单行 |
 | **Plotly zeroline** | 所有图表 Y 轴 `zeroline=True, zerolinecolor='lightgray'` |
 | **RevIN 开关** | 表单中勾选"启用 RevIN"，自动透传 `--revin` 参数 |
 | **指标直接读取** | 直接从 JSON metrics 读取，绝不重新计算 |
 | **实时 Log** | `subprocess.Popen` + `iter(stdout.readline)` 实时打屏，不阻塞 UI |
-| **自动刷新** | 实验结束后 `st.rerun()` 自动刷新加载最新 JSON |
-| **Sample ID 动态范围** | 从 `preview['count']` 动态读取最大样本数 |
-| **历史连贯波形** | X 轴从 `-seq_len` 到 `pred_len-1`，x=0 分隔虚线 |
 | **expander 表单** | 侧边栏表单折叠 `expanded=False`，节省主视图空间 |
 
 ## 输出

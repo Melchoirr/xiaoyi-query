@@ -158,10 +158,11 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         Y_train_3d = Y_train.reshape(Y_train.shape[0], pred_len, -1) \
             if Y_train.ndim == 2 else Y_train.astype(np.float32)
 
-        # 保存截断前 100 条 X_test 原始值（Dashboard 连贯波形用）
+        # ── 保存截断前 100 条 X_test 原始值（Dashboard 连贯波形用）───
+        # 关键：必须在 3D 化之前保存原始值，后续统一反归一化
         exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
         MAX_PREVIEW = 100
-        history_preview = X_test[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        history_preview_raw = X_test[:MAX_PREVIEW].copy()
 
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
                 X_test.astype(np.float32))
@@ -193,8 +194,6 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         model.fit(X_train_norm, Y_train_norm)
 
         del X_train_3d, Y_train_3d, X_train_norm, Y_train_norm
-        if use_revin:
-            del X_train_mean, X_train_std
         gc.collect()
 
         # ── 预测阶段 ───────────────────────────────────────────────
@@ -202,6 +201,14 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             if X_test.ndim == 2 else X_test.astype(np.float32)
         Y_test_3d = Y_test.reshape(Y_test.shape[0], pred_len, -1) \
             if Y_test.ndim == 2 else Y_test.astype(np.float32)
+
+        # ── 兜底初始化（防止 UnboundLocalError）────────────────────
+        # 如果 use_revin=False，后续 preview 反归一化时这些变量仍然被引用，
+        # 必须存在且形状正确才能通过 inverse_transform 的 reshape 验证
+        n_test_samples = X_test_3d.shape[0]
+        n_feat = X_test_3d.shape[-1]
+        X_test_mean = np.zeros((n_test_samples, 1, n_feat), dtype=np.float32)
+        X_test_std = np.ones((n_test_samples, 1, n_feat), dtype=np.float32)
 
         if use_revin:
             X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)
@@ -212,6 +219,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             logger.info(f"[{model_name}] RevIN 推理...")
         else:
             X_test_norm = X_test_3d.astype(np.float32)
+            logger.info(f"[{model_name}] 标准推理（无 RevIN）")
 
         del X_test
         gc.collect()
@@ -225,7 +233,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         # RevIN 反归一化：Y_pred = Y_pred_norm * std + mean
         if use_revin:
             Y_pred = (Y_pred_norm * X_test_std + X_test_mean).astype(np.float32)
-            del Y_pred_norm, X_test_mean, X_test_std
+            del Y_pred_norm
         else:
             Y_pred = Y_pred_norm.astype(np.float32)
             del Y_pred_norm
@@ -238,10 +246,9 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[{model_name}] 归一化空间 MAE={metrics.get('MAE', 0):.4f} "
                     f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
 
-        # inverse_transform（仅用于落盘 .npy，Dashboard 可视化使用归一化 preview）
-        # 核心修复：Y_pred / Y_test_3d 均已是归一化值（RevIN 或 TSLib StandardScaler），
-        # inverse_transform 将其恢复为原始物理尺度存入 .npy；
-        # 但 JSON preview 使用归一化值（与 metrics 同尺度），确保 history/trues/preds 量纲一致
+        # ── inverse_transform（全物理尺度落盘 + JSON preview）──────
+        # 统一将归一化值转回原始物理尺度后落盘 JSON / .npy
+        # 关键：test_set 必须在 preview 全部处理完毕后再 del
         n_test, p_len, n_feat = Y_pred.shape
         Y_pred_flat = Y_pred.reshape(-1, n_feat)
         Y_test_flat = Y_test_3d.reshape(-1, n_feat)
@@ -252,28 +259,20 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
         Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
 
-        del test_set, Y_pred_flat, Y_test_flat
-        gc.collect()
-
-        # 落盘（原始物理尺度 .npy）
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig)
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig)
 
-        # JSON preview：使用归一化值（与 metrics 计算尺度完全一致）
-        # 关键修复：Y_pred 和 Y_test_3d 均为归一化尺度，
-        # history_preview 也是原始 X_test 在归一化前按展平顺序保存，
-        # 三者量纲统一，Dashboard 波形左右连贯
-        preview_pred = Y_pred[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-        preview_true = Y_test_3d[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-        # RevIN 训练时额外记录均值/标准差，供前端双尺度切换使用
-        revin_stats = None
-        if use_revin:
-            revin_stats = {
-                'mean': X_test_mean[:MAX_PREVIEW].tolist() if X_test_mean.ndim == 3 else X_test_mean.tolist(),
-                'std': X_test_std[:MAX_PREVIEW].tolist() if X_test_std.ndim == 3 else X_test_std.tolist(),
-            }
+        # JSON preview：三路数据（history / trues / preds）全部统一反归一化
+        preview_hist = history_preview_raw.reshape(-1, n_feat)
+        preview_hist_orig = test_set.inverse_transform(preview_hist) \
+            .reshape(MAX_PREVIEW, seq_len * n_feat).tolist()
+        preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
 
-        del Y_pred_orig, Y_test_orig, Y_pred, Y_test_3d, X_test_3d, Y_test
+        del test_set, Y_pred_flat, Y_test_flat
+        gc.collect()
+
+        del Y_pred_orig, Y_test_orig
         gc.collect()
 
         return {
@@ -284,10 +283,8 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             'preview': {
                 'preds': preview_pred,
                 'trues': preview_true,
-                'history': history_preview,
+                'history': preview_hist_orig,
                 'count': min(len(preview_pred), len(preview_true)),
-                'revin_stats': revin_stats,
-                'use_revin': use_revin,
             },
             'npy_file': {
                 'preds': f"{exp_id}_preds.npy",
