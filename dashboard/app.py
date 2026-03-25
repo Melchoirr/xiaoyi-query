@@ -59,16 +59,6 @@ st.markdown("""
         margin: 0.5rem;
     }
 
-    /* 成功指标样式 */
-    .metric-success {
-        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-    }
-
-    /* 警告指标样式 */
-    .metric-warning {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-    }
-
     /* 信息面板样式 */
     .info-panel {
         background-color: #f8f9fa;
@@ -112,17 +102,8 @@ def load_experiment_log(output_dir: str = './results') -> Optional[Dict[str, Any
 def _get_prediction_filename(model_name: str, seq_len: int, pred_len: int, config: dict = None) -> str:
     """
     根据模型类型生成预测文件名
-
-    Args:
-        model_name: 模型名称
-        seq_len: 序列长度
-        pred_len: 预测长度
-        config: 可选的配置字典
-
-    Returns:
-        文件名前缀（不含扩展名）
     """
-    dataset_name = 'ETTm1'  # 默认数据集名
+    dataset_name = 'ETTm1'
 
     if model_name == 'PatternSearch':
         top_k = config.get('top_k', 5) if config else 5
@@ -131,7 +112,7 @@ def _get_prediction_filename(model_name: str, seq_len: int, pred_len: int, confi
         n_hash = config.get('n_hash_funcs', 16) if config else 16
         n_tables = config.get('n_tables', 4) if config else 4
         return f"{dataset_name}_seq{seq_len}_pred{pred_len}_lsh_h{n_hash}_t{n_tables}"
-    else:  # SAXSearch
+    else:
         word_size = config.get('word_size', 8) if config else 8
         alpha = config.get('alphabet_size', 8) if config else 8
         return f"{dataset_name}_seq{seq_len}_pred{pred_len}_sax_w{word_size}_a{alpha}"
@@ -145,30 +126,20 @@ def load_predictions(
     config: dict = None
 ) -> tuple:
     """
-    加载预测结果、真实值、以及历史输入序列（任务7：历史上下文）
+    加载预测结果、真实值、以及历史输入序列
 
     Returns:
         (preds, trues, x_test) 元组
     """
-    # 生成文件名
     exp_id = _get_prediction_filename(model_name, seq_len, pred_len, config)
 
     preds_path = os.path.join(output_dir, f"{exp_id}_preds.npy")
     trues_path = os.path.join(output_dir, f"{exp_id}_trues.npy")
     x_test_path = os.path.join(output_dir, f"{exp_id}_X_test.npy")
 
-    preds = None
-    trues = None
-    x_test = None
-
-    if os.path.exists(preds_path):
-        preds = np.load(preds_path)
-
-    if os.path.exists(trues_path):
-        trues = np.load(trues_path)
-
-    if os.path.exists(x_test_path):
-        x_test = np.load(x_test_path)
+    preds = np.load(preds_path) if os.path.exists(preds_path) else None
+    trues = np.load(trues_path) if os.path.exists(trues_path) else None
+    x_test = np.load(x_test_path) if os.path.exists(x_test_path) else None
 
     return preds, trues, x_test
 
@@ -176,37 +147,18 @@ def load_predictions(
 def find_available_predictions(output_dir: str) -> List[Dict[str, Any]]:
     """
     扫描结果目录，找到所有可用的预测文件
-
-    Args:
-        output_dir: 结果目录
-
-    Returns:
-        可用预测文件的配置列表
     """
     if not os.path.exists(output_dir):
         return []
 
     available = []
-    files = os.listdir(output_dir)
-
-    for f in files:
+    for f in os.listdir(output_dir):
         if not f.endswith('_preds.npy'):
             continue
-
-        # 解析文件名
-        # 格式: ETTm1_seq{seq_len}_pred{pred_len}_k{top_k}_preds.npy
-        # 或: ETTm1_seq{seq_len}_pred{pred_len}_lsh_h{hash}_t{tables}_preds.npy
-        # 或: ETTm1_seq{seq_len}_pred{pred_len}_sax_w{word}_a{alpha}_preds.npy
-
         try:
-            # 去掉后缀
             base = f.replace('_preds.npy', '')
-
-            # 提取基本信息
             parts = base.split('_')
-            dataset = parts[0]
 
-            # 找到 seq 和 pred
             seq_len = None
             pred_len = None
             model_name = None
@@ -222,18 +174,12 @@ def find_available_predictions(output_dir: str) -> List[Dict[str, Any]]:
                     extra_params['top_k'] = int(parts[i + 1])
                 elif part == 'lsh':
                     model_name = 'LSHSearch'
-                    # lsh_h{n_hash}_t{n_tables}
-                    h_part = parts[i + 1]  # h{hash}
-                    t_part = parts[i + 2]  # t{tables}
-                    extra_params['n_hash_funcs'] = int(h_part[1:])
-                    extra_params['n_tables'] = int(t_part[1:])
+                    extra_params['n_hash_funcs'] = int(parts[i + 1][1:])
+                    extra_params['n_tables'] = int(parts[i + 2][1:])
                 elif part == 'sax':
                     model_name = 'SAXSearch'
-                    # sax_w{word}_a{alpha}
-                    w_part = parts[i + 1]  # w{word}
-                    a_part = parts[i + 2]  # a{alpha}
-                    extra_params['word_size'] = int(w_part[1:])
-                    extra_params['alphabet_size'] = int(a_part[1:])
+                    extra_params['word_size'] = int(parts[i + 1][1:])
+                    extra_params['alphabet_size'] = int(parts[i + 2][1:])
 
             if model_name and seq_len and pred_len:
                 available.append({
@@ -264,14 +210,18 @@ def render_header():
 
 def render_sidebar() -> Dict[str, Any]:
     """
-    渲染侧边栏（含 st.form 一键启动 + 实时终端 Log）
+    渲染侧边栏
 
-    任务三：st.form + subprocess.Popen 实时打屏，不阻塞 UI
-    任务四（表单部分）：允许手填 seq_len / pred_len（覆盖预设列表）
+    任务三（UI 紧凑化）：
+    - 表单封装在 st.sidebar.expander("🚀 启动新实验") 中，默认折叠
+    - 追加 --revin 参数透传
+    - 实验结束后 st.rerun() 自动刷新加载最新 JSON
+
+    任务三（Sample ID 限制修复）：
+    - max_preview_count 从 preview['count'] 动态读取
     """
     st.sidebar.markdown("## ⚙️ 配置选项")
 
-    # 输出目录
     output_dir = st.sidebar.text_input(
         "结果目录",
         value="./results",
@@ -279,171 +229,161 @@ def render_sidebar() -> Dict[str, Any]:
     )
 
     # ─────────────────────────────────────────────────────────────────
-    # 任务三：st.form 一键启动 + 实时 Log（非阻塞 Popen）
+    # 表单：封装在 st.sidebar.expander 中，默认折叠
     # ─────────────────────────────────────────────────────────────────
-    with st.sidebar.form("experiment_form", clear_on_submit=False):
-        st.markdown("### 🚀 一键启动实验")
+    with st.sidebar.expander("🚀 启动新实验", expanded=False):
+        with st.form("experiment_form", clear_on_submit=False):
+            st.markdown("**快速启动配置**")
 
-        # 模型选择
-        run_model = st.selectbox(
-            "模型",
-            options=['PatternSearch', 'LSHSearch', 'SAXSearch', 'all'],
-            index=3,
-            help="选择要运行的模型"
-        )
+            run_model = st.selectbox(
+                "模型",
+                options=['PatternSearch', 'LSHSearch', 'SAXSearch', 'all'],
+                index=3,
+                help="选择要运行的模型"
+            )
 
-        # ── PatternSearch 参数 ──
-        if run_model in ('PatternSearch', 'all'):
-            with st.expander("PatternSearch 参数", expanded=False):
-                run_top_k = st.number_input(
-                    "top_k（近邻数）", min_value=1, max_value=100,
-                    value=5, step=1, help="取最近邻的数量"
-                )
-                run_weighted_ps = st.checkbox("weighted（逆距离加权）", value=True)
+            # ── PatternSearch 参数 ──
+            if run_model in ('PatternSearch', 'all'):
+                with st.expander("PatternSearch 参数", expanded=False):
+                    run_top_k = st.number_input(
+                        "top_k（近邻数）", min_value=1, max_value=100,
+                        value=5, step=1, help="取最近邻的数量"
+                    )
+                    run_weighted_ps = st.checkbox("weighted（逆距离加权）", value=True)
 
-        # ── LSHSearch 参数 ──
-        if run_model in ('LSHSearch', 'all'):
-            with st.expander("LSHSearch 参数", expanded=False):
-                run_n_hash = st.number_input(
-                    "n_hash_funcs（哈希函数数）", min_value=1, max_value=64,
-                    value=16, step=1
-                )
-                run_n_tables = st.number_input(
-                    "n_tables（哈希表数量）", min_value=1, max_value=16,
-                    value=4, step=1
-                )
-                run_lsh_cap = st.number_input(
-                    "candidate_cap_total（候选上限）", min_value=64, max_value=4096,
-                    value=1024, step=64
-                )
-                run_lsh_weighted = st.checkbox("lsh_weighted（加权重排）", value=False)
+            # ── LSHSearch 参数 ──
+            if run_model in ('LSHSearch', 'all'):
+                with st.expander("LSHSearch 参数", expanded=False):
+                    run_n_hash = st.number_input(
+                        "n_hash_funcs（哈希函数数）", min_value=1, max_value=64,
+                        value=16, step=1
+                    )
+                    run_n_tables = st.number_input(
+                        "n_tables（哈希表数量）", min_value=1, max_value=16,
+                        value=4, step=1
+                    )
+                    run_lsh_cap = st.number_input(
+                        "candidate_cap_total（候选上限）", min_value=64, max_value=4096,
+                        value=1024, step=64
+                    )
+                    run_lsh_weighted = st.checkbox("lsh_weighted（加权重排）", value=False)
 
-        # ── SAXSearch 参数 ──
-        if run_model in ('SAXSearch', 'all'):
-            with st.expander("SAXSearch 参数", expanded=False):
-                run_word_size = st.number_input(
-                    "word_size（词大小）", min_value=2, max_value=32,
-                    value=8, step=1
-                )
-                run_alpha_size = st.number_input(
-                    "alphabet_size（字母表大小）", min_value=2, max_value=32,
-                    value=8, step=1
-                )
-                run_bucket_k = st.number_input(
-                    "bucket_top_k（桶内近邻数）", min_value=1, max_value=32,
-                    value=8, step=1
-                )
-                run_sax_weighted = st.checkbox("sax_weighted（加权聚合）", value=True)
+            # ── SAXSearch 参数 ──
+            if run_model in ('SAXSearch', 'all'):
+                with st.expander("SAXSearch 参数", expanded=False):
+                    run_word_size = st.number_input(
+                        "word_size（词大小）", min_value=2, max_value=32,
+                        value=8, step=1
+                    )
+                    run_alpha_size = st.number_input(
+                        "alphabet_size（字母表大小）", min_value=2, max_value=32,
+                        value=8, step=1
+                    )
+                    run_bucket_k = st.number_input(
+                        "bucket_top_k（桶内近邻数）", min_value=1, max_value=32,
+                        value=8, step=1
+                    )
+                    run_sax_weighted = st.checkbox("sax_weighted（加权聚合）", value=True)
 
-        # ── 全局参数（手填，支持 TSLib 常用非预设值）────────────────
-        run_seq_len = st.number_input(
-            "seq_len（输入长度）", min_value=1, max_value=10000,
-            value=96, step=1,
-            help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
-        )
-        run_pred_len = st.number_input(
-            "pred_len（预测长度）", min_value=1, max_value=10000,
-            value=48, step=1,
-            help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
-        )
-        run_mean_shift = st.checkbox(
-            "启用 Mean-Shift（DLinear-style）", value=False,
-            help="训练和推理时均减去输入序列均值"
-        )
-        run_gpu = st.checkbox("启用 GPU 加速", value=False)
+            # ── 全局参数 ──
+            run_seq_len = st.number_input(
+                "seq_len（输入长度）", min_value=1, max_value=10000,
+                value=96, step=1,
+                help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
+            )
+            run_pred_len = st.number_input(
+                "pred_len（预测长度）", min_value=1, max_value=10000,
+                value=48, step=1,
+                help="TSLib 常用值：96, 192, 336, 720（支持任意正整数）"
+            )
+            run_revin = st.checkbox(
+                "启用 RevIN（可逆实例归一化）", value=False,
+                help="训练/推理执行 (X-mean)/std 归一化，预测后 Y_pred*std+mean 反归一化"
+            )
+            run_gpu = st.checkbox("启用 GPU 加速", value=False)
 
-        submitted = st.form_submit_button(
-            "▶️ 运行实验",
-            type="primary",
-            use_container_width=True
-        )
+            submitted = st.form_submit_button(
+                "▶️ 运行实验",
+                type="primary",
+                use_container_width=True
+            )
 
-        # ── 任务三（核心）：提交后通过 subprocess.Popen 非阻塞启动 ──
-        if submitted:
-            import subprocess
-            import sys
+            # ── 核心：subprocess.Popen 非阻塞启动 ──
+            if submitted:
+                import subprocess
+                import sys as _sys
 
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            run_py = os.path.join(project_root, 'run.py')
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                run_py = os.path.join(project_root, 'run.py')
 
-            cmd = [
-                sys.executable,
-                run_py,
-                "--model", run_model,
-                "--seq_len", str(int(run_seq_len)),
-                "--pred_len", str(int(run_pred_len)),
-            ]
-            if run_gpu:
-                cmd.append("--use_gpu")
-            if run_mean_shift:
-                cmd.append("--mean_shift")
+                cmd = [
+                    _sys.executable,
+                    run_py,
+                    "--model", run_model,
+                    "--seq_len", str(int(run_seq_len)),
+                    "--pred_len", str(int(run_pred_len)),
+                ]
+                if run_gpu:
+                    cmd.append("--use_gpu")
+                if run_revin:
+                    cmd.append("--revin")
 
-            if run_model == 'PatternSearch':
-                cmd.extend(["--top_k", str(int(run_top_k))])
-                cmd.extend(["--weighted", str(run_weighted_ps).lower()])
-            elif run_model == 'LSHSearch':
-                cmd.extend(["--n_hash_funcs", str(int(run_n_hash))])
-                cmd.extend(["--n_tables", str(int(run_n_tables))])
-                cmd.extend(["--candidate_cap_total", str(int(run_lsh_cap))])
-                cmd.extend(["--lsh_weighted", str(run_lsh_weighted).lower()])
-            elif run_model == 'SAXSearch':
-                cmd.extend(["--word_size", str(int(run_word_size))])
-                cmd.extend(["--alphabet_size", str(int(run_alpha_size))])
-                cmd.extend(["--bucket_top_k", str(int(run_bucket_k))])
-                cmd.extend(["--sax_weighted", str(run_sax_weighted).lower()])
+                if run_model == 'PatternSearch':
+                    cmd.extend(["--top_k", str(int(run_top_k))])
+                    cmd.extend(["--weighted", str(run_weighted_ps).lower()])
+                elif run_model == 'LSHSearch':
+                    cmd.extend(["--n_hash_funcs", str(int(run_n_hash))])
+                    cmd.extend(["--n_tables", str(int(run_n_tables))])
+                    cmd.extend(["--candidate_cap_total", str(int(run_lsh_cap))])
+                    cmd.extend(["--lsh_weighted", str(run_lsh_weighted).lower()])
+                elif run_model == 'SAXSearch':
+                    cmd.extend(["--word_size", str(int(run_word_size))])
+                    cmd.extend(["--alphabet_size", str(int(run_alpha_size))])
+                    cmd.extend(["--bucket_top_k", str(int(run_bucket_k))])
+                    cmd.extend(["--sax_weighted", str(run_sax_weighted).lower()])
 
-            st.info(f"执行命令：`{' '.join(cmd)}`")
+                st.info(f"执行命令：`{' '.join(cmd)}`")
 
-            # 实时 Log 容器（不阻塞 UI）
-            log_placeholder = st.empty()
-            log_lines: list = []
+                log_placeholder = st.empty()
+                log_lines: list = []
 
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    cwd=project_root
-                )
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        cwd=project_root
+                    )
 
-                spinner_col, log_col = st.columns([1, 3])
-                with spinner_col:
-                    spinner_placeholder = st.empty()
+                    spinner_ph = st.empty()
+                    for raw_line in iter(process.stdout.readline, ''):
+                        if not raw_line:
+                            break
+                        line = raw_line.rstrip()
+                        log_lines.append(line)
+                        if len(log_lines) > 200:
+                            log_lines = log_lines[-200:]
+                        spinner_ph.info("⏳ 实验运行中（见右侧日志）...")
+                        with log_placeholder.container():
+                            st.code("\n".join(log_lines[-80:]), language=None, height=320)
 
-                with log_col:
-                    spinner_placeholder = st.empty()
+                    process.wait()
 
-                # 逐行读取直到进程结束
-                for raw_line in iter(process.stdout.readline, ''):
-                    if not raw_line:
-                        break
-                    line = raw_line.rstrip()
-                    log_lines.append(line)
-                    # 保留最近 200 行避免内存膨胀
-                    if len(log_lines) > 200:
-                        log_lines = log_lines[-200:]
-                    # 实时追加到页面
-                    spinner_placeholder.info("⏳ 实验运行中（见右侧日志）...")
                     with log_placeholder.container():
-                        st.code("\n".join(log_lines[-80:]), language=None, height=320)
+                        if process.returncode == 0:
+                            spinner_ph.success("✅ 实验完成！")
+                            st.success("✅ 实验完成！正在刷新页面...")
+                            st.rerun()
+                        else:
+                            spinner_ph.error(f"❌ 失败 (exit {process.returncode})")
+                            st.error(f"❌ 实验失败（exit {process.returncode}）")
+                            st.code("\n".join(log_lines[-50:]), language=None, height=200)
+                except Exception as ex:
+                    st.error(f"❌ 启动失败: {ex}")
 
-                process.wait()
-
-                with log_placeholder.container():
-                    if process.returncode == 0:
-                        spinner_placeholder.success("✅ 实验完成！")
-                        st.success("✅ 实验完成！正在刷新页面...")
-                        st.rerun()
-                    else:
-                        spinner_placeholder.error(f"❌ 失败 (exit {process.returncode})")
-                        st.error(f"❌ 实验失败（exit {process.returncode}）")
-                        st.code("\n".join(log_lines[-50:]), language=None, height=200)
-            except Exception as ex:
-                st.error(f"❌ 启动失败: {ex}")
-
-    # ── 以下：已有实验结果的可视化选择器 ─────────────────────────────
+    # ── 已有实验结果的可视化选择器 ───────────────────────────────
     log_data = load_experiment_log(output_dir)
 
     if log_data is None:
@@ -455,7 +395,8 @@ def render_sidebar() -> Dict[str, Any]:
             'selected_pred_len': None,
             'selected_seq_len': None,
             'selected_sample_id': 0,
-            'experiments': []
+            'experiments': [],
+            'max_preview_count': 100
         }
 
     st.sidebar.success("✅ 实验日志已加载")
@@ -483,7 +424,8 @@ def render_sidebar() -> Dict[str, Any]:
             'selected_pred_len': None,
             'selected_seq_len': None,
             'selected_sample_id': 0,
-            'experiments': experiments
+            'experiments': experiments,
+            'max_preview_count': 100
         }
 
     selected_model = st.sidebar.selectbox(
@@ -521,13 +463,22 @@ def render_sidebar() -> Dict[str, Any]:
         help="选择输入序列长度"
     )
 
-    max_samples = min(100, len(experiments) * 5)
+    # 任务三（Sample ID 限制修复）：动态从 preview['count'] 读取最大样本数
+    max_preview_count = 100
+    for exp in experiments:
+        if (exp['status'] == 'success'
+            and exp['config']['model_name'] == selected_model
+            and exp['config']['pred_len'] == selected_pred_len
+            and exp['config']['seq_len'] == selected_seq_len
+            and 'preview' in exp):
+            max_preview_count = max(max_preview_count, exp['preview'].get('count', 100))
+
     selected_sample_id = st.sidebar.slider(
         "样本 ID",
         min_value=0,
-        max_value=max(max_samples - 1, 0),
+        max_value=max(1, max_preview_count - 1),
         value=0,
-        help="选择要查看的样本索引 (0-99)"
+        help=f"选择要查看的样本索引（0-{max_preview_count - 1}）"
     )
 
     return {
@@ -537,16 +488,14 @@ def render_sidebar() -> Dict[str, Any]:
         'selected_pred_len': selected_pred_len,
         'selected_seq_len': selected_seq_len,
         'selected_sample_id': selected_sample_id,
-        'experiments': experiments
+        'experiments': experiments,
+        'max_preview_count': max_preview_count
     }
 
 
 def render_metrics_comparison(log_data: Dict[str, Any]):
     """
     渲染宏观指标对比部分
-
-    Args:
-        log_data: 实验日志数据
     """
     st.markdown("---")
     st.markdown("## 📊 宏观指标对比")
@@ -558,7 +507,6 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
         st.warning("没有成功的实验结果")
         return
 
-    # 构建DataFrame
     df_data = []
     for exp in success_exps:
         row = {
@@ -574,7 +522,6 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
 
     df = pd.DataFrame(df_data)
 
-    # 聚合计算平均值
     agg_df = df.groupby(['Model', 'pred_len']).agg({
         'MAE': 'mean',
         'MSE': 'mean',
@@ -582,18 +529,12 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
         'MAPE': 'mean'
     }).reset_index()
 
-    # 指标选择
     col1, col2 = st.columns(2)
 
     with col1:
-        # MAE柱状图
         st.markdown("### 📉 MAE 对比")
-
         fig_mae = px.bar(
-            agg_df,
-            x='pred_len',
-            y='MAE',
-            color='Model',
+            agg_df, x='pred_len', y='MAE', color='Model',
             barmode='group',
             color_discrete_sequence=px.colors.qualitative.Set2,
             labels={
@@ -603,35 +544,19 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
             },
             title='不同预测长度下的 MAE 对比'
         )
-
         fig_mae.update_layout(
             template='plotly_white',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="right",
-                x=0.99
-            ),
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
             xaxis=dict(tickmode='array', tickvals=[24, 48, 96]),
             height=400
         )
-
-        fig_mae.update_traces(
-            texttemplate='%{y:.4f}',
-            textposition='outside'
-        )
-
+        fig_mae.update_traces(texttemplate='%{y:.4f}', textposition='outside')
         st.plotly_chart(fig_mae, width="stretch")
 
     with col2:
-        # MSE柱状图
         st.markdown("### 📉 MSE 对比")
-
         fig_mse = px.bar(
-            agg_df,
-            x='pred_len',
-            y='MSE',
-            color='Model',
+            agg_df, x='pred_len', y='MSE', color='Model',
             barmode='group',
             color_discrete_sequence=px.colors.qualitative.Set2,
             labels={
@@ -641,34 +566,18 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
             },
             title='不同预测长度下的 MSE 对比'
         )
-
         fig_mse.update_layout(
             template='plotly_white',
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="right",
-                x=0.99
-            ),
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99),
             xaxis=dict(tickmode='array', tickvals=[24, 48, 96]),
             height=400
         )
-
-        fig_mse.update_traces(
-            texttemplate='%{y:.4f}',
-            textposition='outside'
-        )
-
+        fig_mse.update_traces(texttemplate='%{y:.4f}', textposition='outside')
         st.plotly_chart(fig_mse, width="stretch")
 
-    # MAPE柱状图
     st.markdown("### 📈 MAPE 对比")
-
     fig_mape = px.bar(
-        agg_df,
-        x='pred_len',
-        y='MAPE',
-        color='Model',
+        agg_df, x='pred_len', y='MAPE', color='Model',
         barmode='group',
         color_discrete_sequence=px.colors.qualitative.Pastel,
         labels={
@@ -678,19 +587,52 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
         },
         title='不同预测长度下的 MAPE 对比'
     )
-
     fig_mape.update_layout(
         template='plotly_white',
         xaxis=dict(tickmode='array', tickvals=[24, 48, 96]),
         height=350
     )
-
-    fig_mape.update_traces(
-        texttemplate='%{y:.2f}%',
-        textposition='outside'
-    )
-
+    fig_mape.update_traces(texttemplate='%{y:.2f}%', textposition='outside')
     st.plotly_chart(fig_mape, width="stretch")
+
+
+def _extract_target_feature(data: np.ndarray, n_features: int, seq_len: int) -> np.ndarray:
+    """
+    任务二（核心）：从 3D 数据中提取 Target 列（最后一列）
+
+    Args:
+        data: shape (n, seq_or_pred, n_feat) 的 3D 数组
+        n_features: 特征维度
+        seq_len: 时间步长
+
+    Returns:
+        shape (n, seq_or_pred) 的 2D 数组（Target 列）
+    """
+    if n_features > 1:
+        # 3D -> 取最后一个特征（Target / OT 列）
+        return data[:, :, -1]   # shape: (n, seq_or_pred)
+    else:
+        # 1D 直接展平
+        return data.flatten()
+
+
+def _restore_1d_from_preview(raw: np.ndarray, n_features: int) -> np.ndarray:
+    """
+    从 JSON preview 展平数据中提取 Target 列（最后一列）
+
+    preview['history'] = X_test[:100].reshape(100, -1)  # 展平了
+    展平长度 = seq_len * n_feat
+
+    Returns:
+        shape (seq_len,) 的 1D 数组
+    """
+    if n_features > 1:
+        flat_len = len(raw)
+        seq_len = flat_len // n_features
+        reshaped = raw[:seq_len * n_features].reshape(seq_len, n_features)
+        return reshaped[:, -1]   # Target 列
+    else:
+        return raw.flatten()
 
 
 def render_waveform_comparison(
@@ -700,12 +642,14 @@ def render_waveform_comparison(
     """
     渲染微观波形对比
 
-    任务四（指标）：直接读取 JSON 里的 MAE/MSE/RMSE/MAPE/CORR，
-                   用 cols = st.columns(5) 紧凑排列，绝不重新计算。
+    任务三（指标5列）：cols = st.columns(5)，直接读取 JSON metrics，绝不重新计算
 
-    任务四（波形）：读取 preview['history']，X 轴从 -seq_len 到 pred_len-1，
-                   [-seq_len, -1] 画历史真实，[0, pred_len-1] 画未来真实与预测，
-                   x=0 画垂直虚线分隔过去与未来。
+    任务二（Target列绘图）：
+    - 强制只提取最后一列（Target / OT）进行绘图
+    - 历史波形：gray（浅灰）
+    - 真实未来：blue（深蓝实线）
+    - 预测波形：red（红色虚线加粗）
+    - M 模式注释说明
     """
     st.markdown("---")
     st.markdown("## 🔍 微观波形探查 (Case Study)")
@@ -734,7 +678,7 @@ def render_waveform_comparison(
     """, unsafe_allow_html=True)
     st.markdown("")
 
-    # ── 任务四（指标5列）：从 JSON 直接读取，不重新计算 ───────────────
+    # ── 匹配实验 ───────────────────────────────────────────────
     matching_exp = None
     for exp in experiments:
         if (exp['status'] == 'success'
@@ -754,6 +698,7 @@ def render_waveform_comparison(
     else:
         mae = mse = rmse = mape = corr = 0.0
 
+    # ── 任务三（指标5列）：st.columns(5) + HTML 渐变色卡片 ─────────
     cols = st.columns(5)
     metric_labels = ['MAE', 'MSE', 'RMSE', 'MAPE', 'CORR']
     metric_values = [mae, mse, rmse, mape, corr]
@@ -777,82 +722,88 @@ def render_waveform_comparison(
 
     st.markdown("")
 
-    # ── 尝试从 JSON preview 读取连贯波形数据 ─────────────────────────
+    # ── 尝试从 JSON preview 读取连贯波形数据 ───────────────────────
     preview = None
+    is_multivariate = False
+    n_features = 1
+
     if matching_exp and 'preview' in matching_exp:
         preview = matching_exp['preview']
+        # 从 history 的长度推断 n_features
+        if preview and 'history' in preview and len(preview['history']) > 0:
+            hist_len = len(preview['history'][0])
+            n_features = hist_len // seq_len if hist_len % seq_len == 0 else 1
+            if n_features > 1:
+                is_multivariate = True
 
     if preview is not None and 'history' in preview and 'trues' in preview and 'preds' in preview:
-        history_list = preview['history']      # list of list（展平的 2D）
-        true_list = preview['trues']           # list of list
-        pred_list = preview['preds']           # list of list
+        history_list = preview['history']
+        true_list = preview['trues']
+        pred_list = preview['preds']
 
         if (sample_id < len(history_list)
             and sample_id < len(true_list)
             and sample_id < len(pred_list)):
 
-            # 恢复数据（从展平的 2D 恢复）
+            # ── 任务二（核心）：提取 Target 列（最后一列）──────────────
             hist_raw = np.array(history_list[sample_id])
             true_raw = np.array(true_list[sample_id])
             pred_raw = np.array(pred_list[sample_id])
 
-            # 推算 n_features：从 true_raw 的长度与 pred_len 推断
-            true_n_feat = 1 if true_raw.ndim == 1 else true_raw.shape[-1]
+            hist_sample = _restore_1d_from_preview(hist_raw, n_features)  # (seq_len,)
+            true_sample = _restore_1d_from_preview(true_raw, n_features)  # (pred_len,)
+            pred_sample = _restore_1d_from_preview(pred_raw, n_features)  # (pred_len,)
 
-            # 多变量取第 0 特征
-            if true_n_feat > 1:
-                hist_flat = hist_raw[:(len(hist_raw) // true_n_feat) * true_n_feat]
-                hist_sample = hist_flat.reshape(-1, true_n_feat)[:, 0]
-                true_flat = true_raw[:(len(true_raw) // true_n_feat) * true_n_feat]
-                true_sample = true_flat.reshape(-1, true_n_feat)[:, 0]
-                pred_flat = pred_raw[:(len(pred_raw) // true_n_feat) * true_n_feat]
-                pred_sample = pred_flat.reshape(-1, true_n_feat)[:, 0]
-            else:
-                hist_sample = hist_raw.flatten()
-                true_sample = true_raw.flatten()
-                pred_sample = pred_raw.flatten()
+            # M 模式说明注释
+            if is_multivariate:
+                st.info(
+                    "📌 **多变量 (M) 模式说明**：数据包含多个特征变量（n_features > 1）。"
+                    "波形图仅展示 **Target 特征（最后一列）** 的变化趋势，"
+                    "以避免多特征重叠导致的图表杂乱。"
+                )
 
             # ── 连贯波形：X 轴从 -seq_len 到 pred_len-1 ────────────
             st.markdown(f"### 📈 连贯波形（样本 #{sample_id}）")
 
             fig = go.Figure()
 
-            # 左侧：历史真实（[-seq_len, -1]，淡色背景）
+            # 历史真实（[-seq_len, -1]，gray 浅灰）
             hist_x = list(range(-seq_len, 0))
             fig.add_trace(go.Scatter(
                 x=hist_x, y=hist_sample.tolist(), mode='lines',
                 name='历史真实 (History)',
-                line=dict(color='#94C8D8', width=1.8), opacity=0.7,
+                line=dict(color='#B0B0B0', width=2.0),
+                opacity=0.8,
                 hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
             ))
 
-            # 右侧：未来真实（[0, pred_len-1]）
+            # 未来真实（[0, pred_len-1]，blue 深蓝实线加粗）
             future_x = list(range(0, len(true_sample)))
             fig.add_trace(go.Scatter(
                 x=future_x, y=true_sample.tolist(), mode='lines+markers',
                 name='未来真实 (Ground Truth)',
-                line=dict(color='#2E86AB', width=2.5),
-                marker=dict(size=6, symbol='circle'),
+                line=dict(color='#1F4E79', width=3.0),
+                marker=dict(size=7, symbol='circle'),
                 hovertemplate='时间: %{x}<br>真实值: %{y:.4f}<extra></extra>'
             ))
 
-            # 右侧：模型预测（红色虚线）
+            # 模型预测（[0, pred_len-1]，red 红色虚线加粗）
             fig.add_trace(go.Scatter(
                 x=future_x, y=pred_sample.tolist(), mode='lines+markers',
                 name='模型预测 (Prediction)',
-                line=dict(color='#E94F37', width=2.5, dash='dash'),
-                marker=dict(size=6, symbol='square'),
+                line=dict(color='#C00000', width=3.0, dash='dash'),
+                marker=dict(size=7, symbol='square'),
                 hovertemplate='时间: %{x}<br>预测值: %{y:.4f}<extra></extra>'
             ))
 
             # x=0 垂直虚线（历史/未来分界线）
-            fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.8)
+            fig.add_vline(x=0, line_dash="dot", line_color="#404040", line_width=2.0)
 
             # 误差区域填充
             fig.add_trace(go.Scatter(
                 x=future_x + future_x[::-1],
                 y=(pred_sample - true_sample).tolist() + [0] * len(future_x),
-                fill='toself', fillcolor='rgba(233, 79, 55, 0.12)',
+                fill='toself', fillcolor='rgba(220, 80, 80, 0.15)',
                 line=dict(color='rgba(255,255,255,0)'),
                 name='预测误差带', showlegend=True,
                 hovertemplate='时间: %{x}<br>误差: %{y:.4f}<extra></extra>'
@@ -888,11 +839,6 @@ def render_waveform_comparison(
             with s4:
                 st.metric("样本 ID", f"#{sample_id}")
 
-            st.info(
-                f"📌 **历史上下文说明**：左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
-                "右侧（X ≥ 0）为预测区间。灰色垂直虚线（X=0）为历史与未来的分界线。"
-            )
-
             # 多样本批量对比
             st.markdown("### 📊 多样本批量对比视图")
             n_multi = 5
@@ -907,27 +853,20 @@ def render_waveform_comparison(
                 if (idx < len(history_list)
                     and idx < len(true_list)
                     and idx < len(pred_list)):
+                    h_r = np.array(history_list[idx])
+                    t_r = np.array(true_list[idx])
+                    p_r = np.array(pred_list[idx])
+                    t_s = _restore_1d_from_preview(t_r, n_features)
+                    p_s = _restore_1d_from_preview(p_r, n_features)
 
-                    t_raw = np.array(true_list[idx])
-                    p_raw = np.array(pred_list[idx])
-
-                    if true_n_feat > 1:
-                        t_flat = t_raw[:(len(t_raw) // true_n_feat) * true_n_feat]
-                        t = t_flat.reshape(-1, true_n_feat)[:, 0]
-                        p_flat = p_raw[:(len(p_raw) // true_n_feat) * true_n_feat]
-                        p = p_flat.reshape(-1, true_n_feat)[:, 0]
-                    else:
-                        t = t_raw.flatten()
-                        p = p_raw.flatten()
-
-                    offset = i * (len(t) + 5)
+                    offset = i * (len(t_s) + 5)
                     fig_multi.add_trace(go.Scatter(
-                        x=[x + offset for x in range(len(t))], y=t.tolist(),
+                        x=[x + offset for x in range(len(t_s))], y=t_s.tolist(),
                         mode='lines', name=f'真实 #{idx}',
                         line=dict(color=colors_true[i], width=2), showlegend=True
                     ))
                     fig_multi.add_trace(go.Scatter(
-                        x=[x + offset for x in range(len(p))], y=p.tolist(),
+                        x=[x + offset for x in range(len(p_s))], y=p_s.tolist(),
                         mode='lines', name=f'预测 #{idx}',
                         line=dict(color=colors_pred[i], width=2, dash='dash'), showlegend=True
                     ))
@@ -957,7 +896,6 @@ def render_waveform_comparison(
             st.markdown("### 📋 示例波形展示（模拟数据）")
 
             n_timesteps = pred_len
-            x_axis = list(range(n_timesteps))
             true_wave = np.sin(np.linspace(0, 4 * np.pi, n_timesteps)) * 2 \
                 + np.random.randn(n_timesteps) * 0.3
             if model == 'PatternSearch':
@@ -969,15 +907,15 @@ def render_waveform_comparison(
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=x_axis, y=true_wave, mode='lines+markers',
+                x=list(range(n_timesteps)), y=true_wave.tolist(), mode='lines+markers',
                 name='真实值 (Ground Truth)',
-                line=dict(color='#2E86AB', width=2), marker=dict(size=6),
+                line=dict(color='#1F4E79', width=2.5), marker=dict(size=6),
                 hovertemplate='时间点: %{x}<br>真实值: %{y:.4f}<extra></extra>'
             ))
             fig.add_trace(go.Scatter(
-                x=x_axis, y=pred_wave, mode='lines+markers',
+                x=list(range(n_timesteps)), y=pred_wave.tolist(), mode='lines+markers',
                 name='预测值 (Prediction)',
-                line=dict(color='#E94F37', width=2, dash='dash'), marker=dict(size=6),
+                line=dict(color='#C00000', width=2.5, dash='dash'), marker=dict(size=6),
                 hovertemplate='时间点: %{x}<br>预测值: %{y:.4f}<extra></extra>'
             ))
             fig.update_layout(
@@ -991,63 +929,84 @@ def render_waveform_comparison(
             )
             st.plotly_chart(fig, width="stretch")
         else:
-            # 从 .npy 加载时的连贯波形渲染
+            # 从 .npy 加载时：同样只提取 Target 列
             if sample_id < len(preds) and sample_id < len(trues):
                 pred_s = preds[sample_id]
                 true_s = trues[sample_id]
-                if pred_s.ndim > 1:
-                    pred_s = pred_s[:, 0]
-                if true_s.ndim > 1:
-                    true_s = true_s[:, 0]
+                # 判断 n_features
+                if pred_s.ndim == 3:
+                    n_feat = pred_s.shape[-1]
+                elif pred_s.ndim == 2:
+                    n_feat = pred_s.shape[-1]
+                else:
+                    n_feat = 1
 
-                hist_s = None
+                is_multivariate = n_feat > 1
+
+                # 任务二：只提取 Target 列
+                pred_s_1d = pred_s[:, -1] if pred_s.ndim == 3 else (pred_s[:, -1] if pred_s.ndim == 2 else pred_s.flatten())
+                true_s_1d = true_s[:, -1] if true_s.ndim == 3 else (true_s[:, -1] if true_s.ndim == 2 else true_s.flatten())
+
+                hist_s_1d = None
                 if x_test is not None and sample_id < len(x_test):
                     h = x_test[sample_id]
-                    hist_s = h[:, 0] if h.ndim > 1 else h.flatten()
+                    if h.ndim == 3:
+                        hist_s_1d = h[:, -1]
+                    elif h.ndim == 2:
+                        hist_s_1d = h[:, -1]
+                    else:
+                        hist_s_1d = h.flatten()
+
+                if is_multivariate:
+                    st.info(
+                        "📌 **多变量 (M) 模式说明**：数据包含多个特征变量（n_features > 1）。"
+                        "波形图仅展示 **Target 特征（最后一列）** 的变化趋势，"
+                        "以避免多特征重叠导致的图表杂乱。"
+                    )
 
                 st.markdown(f"### 📈 预测结果波形（样本 #{sample_id}）")
                 fig = go.Figure()
 
-                if hist_s is not None:
+                if hist_s_1d is not None:
                     fig.add_trace(go.Scatter(
-                        x=list(range(-seq_len, 0)), y=hist_s.tolist(), mode='lines',
+                        x=list(range(-seq_len, 0)), y=hist_s_1d.tolist(), mode='lines',
                         name='历史真实 (History)',
-                        line=dict(color='#94C8D8', width=1.8), opacity=0.7,
+                        line=dict(color='#B0B0B0', width=2.0), opacity=0.8,
                         hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
                     ))
 
-                fx = list(range(0, len(true_s)))
+                fx = list(range(0, len(true_s_1d)))
                 fig.add_trace(go.Scatter(
-                    x=fx, y=true_s.tolist(), mode='lines+markers',
+                    x=fx, y=true_s_1d.tolist(), mode='lines+markers',
                     name='未来真实 (Ground Truth)',
-                    line=dict(color='#2E86AB', width=2.5),
-                    marker=dict(size=6, symbol='circle'),
+                    line=dict(color='#1F4E79', width=3.0),
+                    marker=dict(size=7, symbol='circle'),
                     hovertemplate='时间: %{x}<br>真实值: %{y:.4f}<extra></extra>'
                 ))
                 fig.add_trace(go.Scatter(
-                    x=fx, y=pred_s.tolist(), mode='lines+markers',
+                    x=fx, y=pred_s_1d.tolist(), mode='lines+markers',
                     name='模型预测 (Prediction)',
-                    line=dict(color='#E94F37', width=2.5, dash='dash'),
-                    marker=dict(size=6, symbol='square'),
+                    line=dict(color='#C00000', width=3.0, dash='dash'),
+                    marker=dict(size=7, symbol='square'),
                     hovertemplate='时间: %{x}<br>预测值: %{y:.4f}<extra></extra>'
                 ))
-                fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.8)
+                fig.add_vline(x=0, line_dash="dot", line_color="#404040", line_width=2.0)
 
-                mae_v = float(np.mean(np.abs(pred_s - true_s)))
-                mse_v = float(np.mean((pred_s - true_s) ** 2))
+                mae_v = float(np.mean(np.abs(pred_s_1d - true_s_1d)))
+                mse_v = float(np.mean((pred_s_1d - true_s_1d) ** 2))
 
                 fig.add_trace(go.Scatter(
                     x=fx + fx[::-1],
-                    y=(pred_s - true_s).tolist() + [0] * len(fx),
-                    fill='toself', fillcolor='rgba(233, 79, 55, 0.12)',
+                    y=(pred_s_1d - true_s_1d).tolist() + [0] * len(fx),
+                    fill='toself', fillcolor='rgba(220, 80, 80, 0.15)',
                     line=dict(color='rgba(255,255,255,0)'),
                     name='预测误差带', showlegend=True,
                     hovertemplate='时间: %{x}<br>误差: %{y:.4f}<extra></extra>'
                 ))
 
-                total_x_range = seq_len + len(true_s)
+                total_x_range = seq_len + len(true_s_1d)
                 fig.update_layout(
-                    title=f'{model} | seq={seq_len} | pred={len(true_s)} | '
+                    title=f'{model} | seq={seq_len} | pred={len(true_s_1d)} | '
                           f'MAE={mae_v:.4f} | MSE={mse_v:.4f}',
                     xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
                     yaxis_title='值',
@@ -1065,18 +1024,13 @@ def render_waveform_comparison(
 
                 ss1, ss2, ss3, ss4 = st.columns(4)
                 with ss1:
-                    st.metric("真实均值", f"{float(np.mean(true_s)):.4f}")
+                    st.metric("真实均值", f"{float(np.mean(true_s_1d)):.4f}")
                 with ss2:
-                    st.metric("预测均值", f"{float(np.mean(pred_s)):.4f}")
+                    st.metric("预测均值", f"{float(np.mean(pred_s_1d)):.4f}")
                 with ss3:
                     st.metric("MAE", f"{mae_v:.4f}")
                 with ss4:
                     st.metric("MSE", f"{mse_v:.4f}")
-
-                st.info(
-                    f"📌 **历史上下文说明**：左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
-                    "右侧（X ≥ 0）为预测区间。灰色垂直虚线（X=0）为历史与未来的分界线。"
-                )
             else:
                 st.error(f"样本 ID {sample_id} 超出范围")
 
@@ -1091,13 +1045,12 @@ def render_model_introduction():
     with col1:
         st.markdown("""
         ### PatternSearch
-        **基于 KD-Tree 的 KNN 检索**
+        **基于 torch.cdist KNN 检索**
 
         - 使用欧氏距离度量相似性
         - 逆距离加权平均
         - 精确近邻搜索
         """)
-
     with col2:
         st.markdown("""
         ### LSHSearch
@@ -1107,7 +1060,6 @@ def render_model_introduction():
         - 多哈希表增加召回率
         - 汉明距离容忍匹配
         """)
-
     with col3:
         st.markdown("""
         ### SAXSearch
@@ -1115,7 +1067,7 @@ def render_model_introduction():
 
         - PAA 降维压缩为 word_size 段
         - 高斯分位数字符化（整数打包）
-        - sklearn NearestNeighbors 模糊匹配（PAA 空间）
+        - sklearn NearestNeighbors 模糊匹配
         """)
 
 
@@ -1124,14 +1076,8 @@ def render_model_introduction():
 # ============================================================
 
 def main():
-    """主函数"""
-    # 渲染头部
     render_header()
-
-    # 渲染侧边栏
     config = render_sidebar()
-
-    # 检查数据可用性
     log_data = config.get('log_data')
 
     if log_data is None:
@@ -1140,13 +1086,8 @@ def main():
         render_model_introduction()
         return
 
-    # 渲染宏观指标对比
     render_metrics_comparison(log_data)
-
-    # 渲染微观波形对比（显式传入 experiments，避免作用域/缺参导致 NameError）
     render_waveform_comparison(config, experiments=log_data.get('experiments', []))
-
-    # 渲染模型介绍
     render_model_introduction()
 
 

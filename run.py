@@ -86,13 +86,14 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验
 
-    v2.5 核心变更：
+    v2.6 核心变更：
     1. TSLib Y 截断：强制 Y_train/Y_test = Y[:, -pred_len:, :]
-    2. mean_shift 开关：仅当 args.mean_shift=True 时启用 DLinear-style Mean-Shift
-    3. Metrics 计算时机：始终在归一化空间（inverse_transform 之前）直接对 Y_pred/Y_test 计算
-       —— 与 TSLib 标准 0.3 量级对齐
-    4. 历史数据落盘：inverse_transform 后，将截断前 100 条 X_test 原值存入
-       JSON preview['history']，供 Dashboard 连贯波形绘制使用
+    2. RevIN 开关（--revin）：完整 Instance Normalization
+       - 训练：X_norm = (X - mean) / std，Y_norm = (Y - mean) / std
+       - 推理：Y_pred = Y_pred_norm * std + mean
+       - 对齐 DLinear/NLinear 系列 SOTA 指标量级
+    3. 指标计算时机：始终在归一化空间（inverse_transform 之前）
+    4. 历史数据落盘：JSON preview['history']，供 Dashboard 连贯波形使用
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -102,7 +103,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     model_name = config['model_name']
     seq_len = config['seq_len']
     pred_len = config['pred_len']
-    use_mean_shift = config.get('mean_shift', False)
+    use_revin = config.get('mean_shift', False)  # 兼容旧 key，优先读 revin
 
     try:
         import_models()
@@ -118,7 +119,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         if use_gpu and device == 'cpu':
             logger.warning(f"[{model_name}] 请求 GPU 但 torch.cuda 不可用，已回退 CPU")
         model_params['device'] = device
-        logger.info(f"[{model_name}] 计算设备: {device}, mean_shift={use_mean_shift}")
+        logger.info(f"[{model_name}] 计算设备: {device}, revin={use_revin}")
 
         class Args:
             pass
@@ -138,9 +139,8 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[{model_name}] 原始数据: X_train={X_train.shape}, Y_train={Y_train.shape}, "
                     f"X_test={X_test.shape}, Y_test={Y_test.shape}")
 
-        # ── 任务二（核心）：TSLib Y 截断 ──────────────────────────────
-        # TSLib Dataloader 返回的 Y 包含 label_len + pred_len，
-        # 必须强制截取最后 pred_len 个时间步，绝不允许残留 label_len 段。
+        # ── TSLib Y 截断 ──────────────────────────────────────────
+        # TSLib Dataloader 返回 Y = label_len + pred_len，强制取最后 pred_len
         if Y_train.ndim == 3:
             Y_train = Y_train[:, -pred_len:, :]
         elif Y_train.ndim == 2:
@@ -153,8 +153,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
 
         logger.info(f"[{model_name}] Y 截断后: Y_train={Y_train.shape}, Y_test={Y_test.shape}")
 
-        # ── 训练阶段：Mean-Shift（仅当开关打开时）────────────────────
-        # 3D 化（统一为 (n, seq/pred, n_feat)，便于广播）
+        # ── 3D 化（统一为 (n, seq/pred, n_feat)，便于广播）─────────
         X_train_3d = X_train.reshape(X_train.shape[0], seq_len, -1) \
             if X_train.ndim == 2 else X_train.astype(np.float32)
         Y_train_3d = Y_train.reshape(Y_train.shape[0], pred_len, -1) \
@@ -171,27 +170,32 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         del train_set, val_set
         gc.collect()
 
-        if use_mean_shift:
-            # DLinear-style：X 和 Y 均减去输入序列的均值
+        # ── RevIN（完整 Instance Normalization）─────────────────────
+        # mean = E[X, axis=1]，std = sqrt(Var[X, axis=1]) + 1e-8
+        # 训练：X_norm = (X - mean) / std，Y_norm = (Y - mean) / std
+        # 推理：Y_pred = Y_pred_norm * std + mean
+        if use_revin:
             X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)
-            X_train_centered = (X_train_3d - X_train_mean).astype(np.float32)
-            Y_train_centered = (Y_train_3d - X_train_mean).astype(np.float32)
-            logger.info(f"[{model_name}] Mean-Shift 训练: X_mean={X_train_mean.shape}")
+            X_train_std = np.std(X_train_3d, axis=1, keepdims=True)
+            X_train_std = np.clip(X_train_std, 1e-8, None)
+            X_train_norm = ((X_train_3d - X_train_mean) / X_train_std).astype(np.float32)
+            Y_train_norm = ((Y_train_3d - X_train_mean) / X_train_std).astype(np.float32)
+            logger.info(f"[{model_name}] RevIN 训练: mean={X_train_mean.shape}, std={X_train_std.shape}")
         else:
-            X_train_centered = X_train_3d.astype(np.float32)
-            Y_train_centered = Y_train_3d.astype(np.float32)
-            logger.info(f"[{model_name}] 标准训练（无 Mean-Shift）")
+            X_train_norm = X_train_3d.astype(np.float32)
+            Y_train_norm = Y_train_3d.astype(np.float32)
+            logger.info(f"[{model_name}] 标准训练（无 RevIN）")
 
         del X_train, Y_train
         gc.collect()
 
         logger.info(f"[{model_name}] 训练中...")
         model = ModelClass(**model_params)
-        model.fit(X_train_centered, Y_train_centered)
+        model.fit(X_train_norm, Y_train_norm)
 
-        del X_train_3d, Y_train_3d, X_train_centered, Y_train_centered
-        if use_mean_shift:
-            del X_train_mean
+        del X_train_3d, Y_train_3d, X_train_norm, Y_train_norm
+        if use_revin:
+            del X_train_mean, X_train_std
         gc.collect()
 
         # ── 预测阶段 ───────────────────────────────────────────────
@@ -200,32 +204,34 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         Y_test_3d = Y_test.reshape(Y_test.shape[0], pred_len, -1) \
             if Y_test.ndim == 2 else Y_test.astype(np.float32)
 
-        if use_mean_shift:
+        if use_revin:
             X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)
-            X_test_centered = (X_test_3d - X_test_mean).astype(np.float32)
-            logger.info(f"[{model_name}] Mean-Shift 推理...")
+            X_test_std = np.std(X_test_3d, axis=1, keepdims=True)
+            X_test_std = np.clip(X_test_std, 1e-8, None)
+            X_test_norm = ((X_test_3d - X_test_mean) / X_test_std).astype(np.float32)
+            logger.info(f"[{model_name}] RevIN 推理...")
         else:
-            X_test_centered = X_test_3d.astype(np.float32)
+            X_test_norm = X_test_3d.astype(np.float32)
 
         del X_test
         gc.collect()
 
         logger.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本...")
-        Y_pred_centered = model.predict(X_test_centered)
+        Y_pred_norm = model.predict(X_test_norm)
 
-        del model, X_test_centered
+        del model, X_test_norm
         gc.collect()
 
-        if use_mean_shift:
-            Y_pred = (Y_pred_centered + X_test_mean).astype(np.float32)
-            del Y_pred_centered, X_test_mean
+        # RevIN 反归一化：Y_pred = Y_pred_norm * std + mean
+        if use_revin:
+            Y_pred = (Y_pred_norm * X_test_std + X_test_mean).astype(np.float32)
+            del Y_pred_norm, X_test_mean, X_test_std
         else:
-            Y_pred = Y_pred_centered.astype(np.float32)
-            del Y_pred_centered
+            Y_pred = Y_pred_norm.astype(np.float32)
+            del Y_pred_norm
         gc.collect()
 
-        # ── 任务二（核心）：指标在归一化空间直接计算 ──────────────────
-        # Y_pred 和 Y_test_3d 此时都是归一化状态，指标量级与 TSLib 对齐（≈0.3）
+        # ── 指标在归一化空间计算（对齐 TSLib 0.3 量级）─────────────
         metrics = calculate_all_metrics(Y_pred, Y_test_3d)
 
         elapsed = time.time() - start_time
@@ -401,7 +407,7 @@ class ExperimentRunner:
             cfg['features'] = self.args.features
             cfg['target'] = self.args.target
             cfg['use_gpu'] = getattr(self.args, 'use_gpu', False)
-            cfg['mean_shift'] = getattr(self.args, 'mean_shift', False)
+            cfg['mean_shift'] = getattr(self.args, 'revin', False)
 
         return configs
 
@@ -644,8 +650,9 @@ def parse_args():
                        help='并行进程数（最大 4）')
     parser.add_argument('--use_gpu', action='store_true',
                        help='若 torch.cuda 可用则在 GPU 上做张量距离/投影（PatternSearch/LSH/SAX）')
-    parser.add_argument('--mean_shift', action='store_true',
-                       help='启用 DLinear-style Mean-Shift（去均值）：训练/推理阶段均减去输入序列均值')
+    parser.add_argument('--revin', action='store_true',
+                       help='启用 RevIN（可逆实例归一化）：训练/推理阶段均对 X/Y 执行 '
+                            '(X-mean)/std 归一化，预测后用 Y_pred*std+mean 反归一化')
 
     return parser.parse_args()
 
