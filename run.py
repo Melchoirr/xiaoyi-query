@@ -86,14 +86,13 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验
 
-    v2.6 核心变更：
-    1. TSLib Y 截断：强制 Y_train/Y_test = Y[:, -pred_len:, :]
-    2. RevIN 开关（--revin）：完整 Instance Normalization
-       - 训练：X_norm = (X - mean) / std，Y_norm = (Y - mean) / std
-       - 推理：Y_pred = Y_pred_norm * std + mean
-       - 对齐 DLinear/NLinear 系列 SOTA 指标量级
-    3. 指标计算时机：始终在归一化空间（inverse_transform 之前）
-    4. 历史数据落盘：JSON preview['history']，供 Dashboard 连贯波形使用
+    v2.7 核心变更：
+    1. RevIN 数值安全：std < 1e-5 时强制置 1.0，避免常量序列/方差极小数据
+       产生除零放大灾难（SAXSearch/LSHSearch MAE 几千的问题）
+    2. TSLib Y 截断：强制 Y_train/Y_test = Y[:, -pred_len:, :]
+    3. RevIN 开关（--revin）：训练 (X-mean)/std，推理 Y_pred*std+mean
+    4. 指标计算时机：始终在归一化空间（inverse_transform 之前）
+    5. 历史数据落盘：JSON preview['history']，供 Dashboard 连贯波形使用
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -170,14 +169,14 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         del train_set, val_set
         gc.collect()
 
-        # ── RevIN（完整 Instance Normalization）─────────────────────
-        # mean = E[X, axis=1]，std = sqrt(Var[X, axis=1]) + 1e-8
-        # 训练：X_norm = (X - mean) / std，Y_norm = (Y - mean) / std
-        # 推理：Y_pred = Y_pred_norm * std + mean
+        # ── RevIN（数值安全版 Instance Normalization）────────────────
+        # 关键防御：如果 std < 1e-5（常量序列/方差极小），强制置为 1.0，
+        # 避免除零放大导致的灾难性数值爆炸（SAXSearch / LSHSearch MAE 几千的问题）
         if use_revin:
             X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)
             X_train_std = np.std(X_train_3d, axis=1, keepdims=True)
-            X_train_std = np.clip(X_train_std, 1e-8, None)
+            # 防御：std < 1e-5 时强制置 1.0（此时序列方差极小，不做缩放）
+            X_train_std = np.where(X_train_std < 1e-5, 1.0, X_train_std)
             X_train_norm = ((X_train_3d - X_train_mean) / X_train_std).astype(np.float32)
             Y_train_norm = ((Y_train_3d - X_train_mean) / X_train_std).astype(np.float32)
             logger.info(f"[{model_name}] RevIN 训练: mean={X_train_mean.shape}, std={X_train_std.shape}")
@@ -207,7 +206,8 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         if use_revin:
             X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)
             X_test_std = np.std(X_test_3d, axis=1, keepdims=True)
-            X_test_std = np.clip(X_test_std, 1e-8, None)
+            # 防御：std < 1e-5 时强制置 1.0（避免除零放大）
+            X_test_std = np.where(X_test_std < 1e-5, 1.0, X_test_std)
             X_test_norm = ((X_test_3d - X_test_mean) / X_test_std).astype(np.float32)
             logger.info(f"[{model_name}] RevIN 推理...")
         else:

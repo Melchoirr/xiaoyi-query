@@ -8,24 +8,25 @@
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
 ```
 
-## 重要更新 (v2.6 RevIN 学术对齐)
+## 重要更新 (v2.7 RevIN 数值安全 + 特征维度选择)
 
-v2.6 / v2.5 对齐 TSLib 指标尺度 + RevIN + 完整 Dashboard UI 升级：
+v2.7 / v2.6 对齐 TSLib 指标尺度 + RevIN + 完整 Dashboard UI 升级：
 
 | 变更类型 | 变更内容 |
 |---------|---------|
-| **RevIN（可逆实例归一化）** | `--revin` 开关：训练 `Y_norm = (Y - X_mean) / X_std`；预测 `Y_pred = Y_norm * X_std + X_mean`，深度学习 SOTA 指标量级 |
+| **RevIN 数值安全（v2.7 新增）** | `std < 1e-5` 时强制置 1.0，避免常量序列/方差极小数据产生除零放大灾难（SAXSearch/LSHSearch MAE 几千的问题） |
+| **特征维度选择器（v2.7 新增）** | 动态下拉框选择要展示的特征列，替代硬编码 `-1`；支持切换任意特征维度 |
+| **HTML flex 单行指标（v2.7 新增）** | `display: flex; justify-content: space-between` 替代 `st.columns()`，跨屏幕强制单行排布，响应式折行问题彻底解决 |
+| **Plotly zeroline（v2.7 新增）** | 所有图表 Y 轴统一配置 `zeroline=True, zerolinecolor='lightgray'`，波形穿越 0 轴时清晰可见 |
+| **RevIN（可逆实例归一化）** | `--revin` 开关：训练 `(X-mean)/std`，推理 `Y_pred*std+mean`，深度学习 SOTA 指标量级 |
 | **Mean-Shift → RevIN** | 原 `--mean_shift` 已升级为完整 `--revin`（mean + std），去均值版本已废弃 |
 | **TSLib Y 截断** | 强制 `Y = Y[:, -pred_len:, :]` 消除 `label_len + pred_len` 残留干扰 |
 | **Shape Broadcast 漏洞修复** | 三个模型的 `fit()` 开头严格捕获 `seq_len / pred_len / n_features`，消除残留 |
 | **指标计算时机** | 始终在归一化空间直接计算（inverse_transform 之前），与 TSLib 0.3 量级对齐 |
 | **历史数据落盘** | JSON `preview['history']` 保存前 100 条 X_test 原值，供 Dashboard 连贯波形使用 |
-| **表单 expander** | 侧边栏实验启动表单封装在 `st.sidebar.expander` 中，默认折叠，节省空间 |
-| **Target 列绘图** | M（多变量）模式下强制只提取最后一列（Target/OT）绘图，避免重叠杂乱 |
-| **波形颜色规范** | 历史：`#B0B0B0`（浅灰）；真实未来：`#1F4E79`（深蓝加粗 3px）；预测：`#C00000`（红色虚线加粗 3px） |
-| **指标 5 列排版** | `st.columns(5)` 直接读取 JSON metrics，绝不重新计算 |
+| **表单 expander** | 侧边栏实验启动表单封装在 `st.sidebar.expander("🚀 启动新实验", expanded=False)` 中，默认折叠 |
 | **实时 Log + 自动刷新** | `subprocess.Popen` + `for line in iter(process.stdout.readline)` 实时打屏；`st.rerun()` 自动刷新加载最新结果 |
-| **Sample ID 限制修复** | `max_preview_count` 从 `preview['count']` 动态读取，替代硬编码 |
+| **Sample ID 动态范围** | `max_preview_count` 从 `preview['count']` 动态读取，替代硬编码 |
 | **Dataset 切分** | 废除 ratio 比例，改为 TSLib 固定边界（月/小时时间戳） |
 | **评估指标** | MAPE/MSPE 移除 `*100`；新增 RSE、CORR；全部 `float()` 包裹防 JSON 序列化 |
 | **MAPE/MSPE 鲁棒性** | Mask 机制过滤 `|true| < 1e-3` 极小值点 |
@@ -221,14 +222,16 @@ python run.py --skip_run --dashboard
 | 功能 | 说明 |
 |------|------|
 | **RevIN 开关** | 表单中勾选"启用 RevIN"，自动透传 `--revin` 参数 |
-| **Target 列绘图** | M 模式下强制只提取最后一列（OT）绘图，附说明注释 |
-| **指标 5 列排版** | `st.columns(5)` 直接读取 JSON metrics，绝不重算 |
+| **特征维度选择器（v2.7 新增）** | 动态下拉框切换任意特征列，替代硬编码 -1；侧边栏实时生效 |
+| **HTML flex 单行指标（v2.7 新增）** | `display: flex` 替代 `st.columns()`，跨屏幕绝对单行，解决响应式折行 |
+| **Plotly zeroline（v2.7 新增）** | 所有图表 Y 轴统一 `zeroline=True, zerolinecolor='lightgray'`，波形穿越0轴清晰可见 |
+| **指标直接读取** | 直接从 JSON metrics 读取，绝不重新计算 |
 | **波形颜色规范** | 历史：浅灰；真实：深蓝；预测：红色虚线 |
 | **实时 Log** | `subprocess.Popen` + `iter(stdout.readline)` 实时打屏，不阻塞 UI |
 | **自动刷新** | 实验结束后 `st.rerun()` 自动刷新加载最新 JSON |
 | **Sample ID 动态范围** | 从 `preview['count']` 动态读取最大样本数 |
 | **历史连贯波形** | X 轴从 `-seq_len` 到 `pred_len-1`，x=0 分隔虚线 |
-| **expander 表单** | 侧边栏表单折叠，节省主视图空间 |
+| **expander 表单** | 侧边栏表单折叠 `expanded=False`，节省主视图空间 |
 
 ## 输出
 
