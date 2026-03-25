@@ -238,7 +238,10 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"[{model_name}] 归一化空间 MAE={metrics.get('MAE', 0):.4f} "
                     f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
 
-        # inverse_transform（仅用于落盘和 Dashboard 可视化）
+        # inverse_transform（仅用于落盘 .npy，Dashboard 可视化使用归一化 preview）
+        # 核心修复：Y_pred / Y_test_3d 均已是归一化值（RevIN 或 TSLib StandardScaler），
+        # inverse_transform 将其恢复为原始物理尺度存入 .npy；
+        # 但 JSON preview 使用归一化值（与 metrics 同尺度），确保 history/trues/preds 量纲一致
         n_test, p_len, n_feat = Y_pred.shape
         Y_pred_flat = Y_pred.reshape(-1, n_feat)
         Y_test_flat = Y_test_3d.reshape(-1, n_feat)
@@ -249,18 +252,28 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
         Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
 
-        del test_set, Y_pred_flat, Y_test_flat, Y_pred, Y_test_3d, X_test_3d, Y_test
+        del test_set, Y_pred_flat, Y_test_flat
         gc.collect()
 
         # 落盘（原始物理尺度 .npy）
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig)
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig)
 
-        # JSON preview（前 100 条 preds / trues / history）
-        preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-        preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        # JSON preview：使用归一化值（与 metrics 计算尺度完全一致）
+        # 关键修复：Y_pred 和 Y_test_3d 均为归一化尺度，
+        # history_preview 也是原始 X_test 在归一化前按展平顺序保存，
+        # 三者量纲统一，Dashboard 波形左右连贯
+        preview_pred = Y_pred[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        preview_true = Y_test_3d[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        # RevIN 训练时额外记录均值/标准差，供前端双尺度切换使用
+        revin_stats = None
+        if use_revin:
+            revin_stats = {
+                'mean': X_test_mean[:MAX_PREVIEW].tolist() if X_test_mean.ndim == 3 else X_test_mean.tolist(),
+                'std': X_test_std[:MAX_PREVIEW].tolist() if X_test_std.ndim == 3 else X_test_std.tolist(),
+            }
 
-        del Y_pred_orig, Y_test_orig
+        del Y_pred_orig, Y_test_orig, Y_pred, Y_test_3d, X_test_3d, Y_test
         gc.collect()
 
         return {
@@ -272,7 +285,9 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'preds': preview_pred,
                 'trues': preview_true,
                 'history': history_preview,
-                'count': min(len(preview_pred), len(preview_true))
+                'count': min(len(preview_pred), len(preview_true)),
+                'revin_stats': revin_stats,
+                'use_revin': use_revin,
             },
             'npy_file': {
                 'preds': f"{exp_id}_preds.npy",
