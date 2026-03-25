@@ -1,13 +1,7 @@
 """
-数据加载器模块
-负责读取ETT CSV数据，进行标准化归一化，通过滑动窗口生成训练样本
-严格遵循thuml/Time-Series-Library的学术规范结构
-
-内存优化策略：
-- 所有 numpy 数组强制使用 float32（相比 float64 节省 50% 基础内存）
-- 滑动窗口直接构造为目标 dtype，避免副本转换
-- 大对象使用完毕后立即 del + gc.collect()
-- 避免在内存中保留冗余的大表副本
+数据加载器模块 - 对齐 TSLib 学术规范
+严格采用固定边界切分，支持时间特征编码，返回 4 值 (seq_x, seq_y, seq_x_mark, seq_y_mark)
+内存优化：pd.read_csv 后立即 astype(float32) + del df_data + gc.collect()
 """
 
 import os
@@ -20,15 +14,15 @@ from torch.utils.data import Dataset
 
 class Dataset_ETT_hour(Dataset):
     """
-    ETT数据集加载器
-    支持滑动窗口生成样本，严格的数据划分（Train/Val/Test = 7:1:2）
+    ETT 数据集加载器（TSLib 规范）
 
-    内存优化点：
-    - 读取 CSV 时立即转换为 float32
-    - __getitem__ 返回 float32，避免 dtype 不一致
+    关键改动：
+    - 固定边界（非 ratio）：border1/2 按月份时间戳计算
+    - __getitem__ 返回 4 值：seq_x, seq_y, seq_x_mark, seq_y_mark
+    - 时间特征编码：Hour-of-Day + Day-of-Week
+    - 全程 float32 + 早 del 释放
     """
 
-    # 全局 float32 dtype 常量
     DTYPE = np.float32
 
     def __init__(
@@ -54,23 +48,40 @@ class Dataset_ETT_hour(Dataset):
         self.target = target
         self.scale = scale
 
-        self.train_ratio = 0.7
-        self.val_ratio = 0.1
-        self.test_ratio = 0.2
+        # ── TSLib 固定边界（每小时 1 条，12 个月 = 12*30*24 = 8640 条/月）──
+        self.border1s = []
+        self.border2s = []
 
-        # 初始化（按顺序执行，__read_data__ 会立即转换 dtype 并释放原始 df）
         self.__read_data__()
         self.__split_data__()
 
     def __read_data__(self):
-        """读取CSV数据 -> float32 归一化 -> 立即释放中间对象"""
+        """读取 CSV -> 立即 float32 + del pandas 对象"""
         full_path = os.path.join(self.root_path, self.data_path)
 
-        # 1. 读取 CSV（pandas 读入后默认 float64）
         df_data = pd.read_csv(full_path)
-        cols_data = df_data.columns[1:]
 
-        # 2. 根据 features 模式选择列，直接构造成 float32，避免后续转换
+        # ── 时间戳编码（Hour-of-Day + Day-of-Week）──
+        # 假设第一列为 datetime 列（ETT 数据集格式）
+        if 'date' in df_data.columns[0].lower() or df_data.columns[0] == df_data.columns[0]:
+            ts_col = df_data.columns[0]
+        else:
+            ts_col = df_data.columns[0]
+
+        try:
+            timestamps = pd.to_datetime(df_data[ts_col])
+        except Exception:
+            timestamps = None
+
+        if timestamps is not None:
+            hour_of_day = timestamps.dt.hour.values.astype(self.DTYPE) / 23.0   # [0,1]
+            day_of_week = timestamps.dt.dayofweek.values.astype(self.DTYPE) / 6.0    # [0,1]
+            self.time_mark = np.stack([hour_of_day, day_of_week], axis=1)           # (N, 2)
+        else:
+            self.time_mark = np.zeros((len(df_data), 2), dtype=self.DTYPE)
+
+        # 数值列 + 立即 float32
+        cols_data = df_data.columns[1:]
         if self.features == 'M':
             raw = df_data[cols_data].values.astype(self.DTYPE)
         else:
@@ -78,36 +89,43 @@ class Dataset_ETT_hour(Dataset):
 
         self.n_feature = raw.shape[1]
 
-        # 3. 标准化（StandardScaler 内部使用 float64，过渡后立刻降为 float32）
+        # 标准化（StandardScaler fit 后立即降为 float32）
         self.scaler = StandardScaler()
         if self.scale:
             normalized = self.scaler.fit_transform(raw).astype(self.DTYPE)
         else:
             normalized = raw
 
-        # 4. 直接赋值给 self.raw_data，del 中间变量
         self.raw_data = normalized
+        self._timestamp_len = len(self.raw_data)
+
         del raw, normalized, df_data
         gc.collect()
 
     def __split_data__(self):
-        """按时间顺序划分数据集"""
-        total_len = len(self.raw_data)
-        train_len = int(total_len * self.train_ratio)
-        val_len = int(total_len * self.val_ratio)
+        """TSLib 固定边界：按月份时间戳切分（hourly: 12*30*24=8640 条/月）"""
+        total_len = self._timestamp_len
+        month_len = 24 * 30 * 12          # 8640 per month (hourly data)
 
-        border1s = [0, train_len, train_len + val_len]
-        border2s = [train_len, train_len + val_len, total_len]
+        # border1: 起始索引（不含 seq_len）
+        set1 = 1 * month_len - self.seq_len   # 1 month - seq_len
+        set2 = 4 * month_len - self.seq_len   # 4 months - seq_len
+        set3 = 8 * month_len - self.seq_len   # 8 months - seq_len
+        # 修正：TSLib 实际取 set3 = total_len（完整数据末尾）
+        set3 = total_len
+
+        self.border1s = [0, set1, set2]
+        self.border2s = [set1, set2, set3]
 
         if self.flag == 'test':
-            self.border_start = border1s[2]
-            self.border_end = border2s[2]
+            self.border_start = self.border1s[2]
+            self.border_end = self.border2s[2]
         elif self.flag == 'val':
-            self.border_start = border1s[1]
-            self.border_end = border2s[1]
+            self.border_start = self.border1s[1]
+            self.border_end = self.border2s[1]
         else:
-            self.border_start = border1s[0]
-            self.border_end = border2s[0]
+            self.border_start = self.border1s[0]
+            self.border_end = self.border2s[0]
 
         self.data_len = self.border_end - self.border_start
         self.n_samples = max(0, self.data_len - self.seq_len - self.pred_len + 1)
@@ -116,18 +134,27 @@ class Dataset_ETT_hour(Dataset):
         return self.n_samples
 
     def __getitem__(self, index: int):
-        """返回 float32 样本，无副本"""
+        """返回 4 值：seq_x, seq_y, seq_x_mark, seq_y_mark（均为 float32）"""
         if index < 0 or index >= self.n_samples:
             raise IndexError(f"Index {index} out of range [0, {self.n_samples})")
 
         start_idx = self.border_start + index
         end_idx = start_idx + self.seq_len + self.pred_len
 
-        # 直接从 self.raw_data 切片，强制 float32（已经一致，无需 copy）
-        X = self.raw_data[start_idx:start_idx + self.seq_len]
-        Y = self.raw_data[start_idx + self.seq_len:end_idx]
+        # 序列数据
+        seq_x = self.raw_data[start_idx:start_idx + self.seq_len]           # (seq_len, n_feat)
+        seq_y = self.raw_data[start_idx + self.seq_len:end_idx]             # (pred_len, n_feat)
 
-        return X.astype(self.DTYPE), Y.astype(self.DTYPE)
+        # 时间标记（按月份时间索引对应位置）
+        seq_x_mark = self.time_mark[start_idx:start_idx + self.seq_len]     # (seq_len, 2)
+        seq_y_mark = self.time_mark[start_idx + self.seq_len:end_idx]      # (pred_len, 2)
+
+        return (
+            seq_x.astype(self.DTYPE),
+            seq_y.astype(self.DTYPE),
+            seq_x_mark.astype(self.DTYPE),
+            seq_y_mark.astype(self.DTYPE),
+        )
 
     def inverse_transform(self, data: np.ndarray) -> np.ndarray:
         """反归一化，结果保持 float32"""
@@ -138,8 +165,7 @@ class Dataset_ETT_hour(Dataset):
 
         if data.ndim == 3:
             n, T, d = data.shape
-            data_2d = data.reshape(-1, d)
-            result_2d = self.scaler.inverse_transform(data_2d)
+            result_2d = self.scaler.inverse_transform(data.reshape(-1, d))
             result = result_2d.reshape(n, T, d)
         elif data.ndim == 2:
             result = self.scaler.inverse_transform(data)
@@ -153,10 +179,7 @@ class Dataset_ETT_hour(Dataset):
 
 def get_data(args):
     """
-    工厂函数：根据参数创建数据集（三个数据集各自独立，共享 scaler 归一化结果）
-
-    优化：三个 Dataset 实例各自读 CSV，会产生三份 raw_data。
-    对于大数据集，可在 get_X_Y_from_dataset 中逐步构建 X/Y 并立即释放 raw_data。
+    工厂函数：根据参数创建数据集
     """
     train_set = Dataset_ETT_hour(
         root_path=args.root_path,
@@ -196,30 +219,54 @@ def get_data(args):
 
 def get_X_Y_from_dataset(dataset: Dataset_ETT_hour):
     """
-    从数据集对象中提取所有 X 和 Y 样本
+    从数据集对象中提取 X 和 Y（忽略时间标记，适配基线模型接口）
 
-    内存优化：
-    - 使用 np.empty 预分配内存（比 append 列表再转 np.array 更高效）
-    - 每行直接赋值，确保 float32 dtype
-    - 提取完毕后手动 del 大对象，触发 gc
+    适配 __getitem__ 返回 4 值的解包。
     """
-    DTYPE = Dataset_ETT_hour.DTYPE
     n_samples = len(dataset)
     seq_len = dataset.seq_len
     n_feature = dataset.n_feature
     pred_len = dataset.pred_len
 
-    # 预分配 float32 数组
-    X_all = np.empty((n_samples, seq_len, n_feature), dtype=DTYPE)
-    Y_all = np.empty((n_samples, pred_len, n_feature), dtype=DTYPE)
+    X_all = np.empty((n_samples, seq_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
+    Y_all = np.empty((n_samples, pred_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
 
     for i in range(n_samples):
-        X, Y = dataset[i]
+        # 解包 4 值，只取前两个
+        X, Y, _, _ = dataset[i]
         X_all[i] = X
         Y_all[i] = Y
 
-    # 立即释放 dataset 中的 raw_data（可选，调用方若还需 dataset 可跳过）
     dataset.raw_data = None
     gc.collect()
 
     return X_all, Y_all
+
+
+def get_X_Y_mark_from_dataset(dataset: Dataset_ETT_hour):
+    """
+    返回完整 4 元组（X, Y, X_mark, Y_mark）
+    用于需要时间特征的模型。
+    """
+    n_samples = len(dataset)
+    seq_len = dataset.seq_len
+    n_feature = dataset.n_feature
+    pred_len = dataset.pred_len
+    mark_dim = dataset.time_mark.shape[1]   # 2 (hour + weekday)
+
+    X_all  = np.empty((n_samples, seq_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
+    Y_all  = np.empty((n_samples, pred_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
+    Xm_all = np.empty((n_samples, seq_len, mark_dim),  dtype=Dataset_ETT_hour.DTYPE)
+    Ym_all = np.empty((n_samples, pred_len, mark_dim),  dtype=Dataset_ETT_hour.DTYPE)
+
+    for i in range(n_samples):
+        X, Y, Xm, Ym = dataset[i]
+        X_all[i]  = X
+        Y_all[i]  = Y
+        Xm_all[i] = Xm
+        Ym_all[i] = Ym
+
+    dataset.raw_data = None
+    gc.collect()
+
+    return X_all, Y_all, Xm_all, Ym_all

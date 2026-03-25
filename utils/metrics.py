@@ -1,178 +1,157 @@
 """
-评估指标模块
-实现时序预测常用的评估指标：MAE, MSE, RMSE, MAPE, MSPE
+评估指标模块 - 对齐 TSLib 学术规范
+
+关键规范：
+1. 所有返回值强制 float() 包裹，避免 numpy 标量无法被 json 序列化
+2. MAPE / MSPE 移除 *100（TSLib 原始公式不带百分号）
+3. 引入 Mask 机制处理接近 0 的真实值，避免数值爆炸
+4. 新增 RSE（Root Squared Error）和 CORR（Pearson 相关系数）
 """
 
 import numpy as np
-from typing import Union
 
+
+# ─────────────────────────────────────────────────────────────
+#  基础指标
+# ─────────────────────────────────────────────────────────────
 
 def mae(preds: np.ndarray, trues: np.ndarray) -> float:
     """
-    Mean Absolute Error (MAE)
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-
-    Returns:
-        MAE值
+    Mean Absolute Error
     """
-    return np.mean(np.abs(preds - trues))
+    return float(np.mean(np.abs(preds - trues)))
 
 
 def mse(preds: np.ndarray, trues: np.ndarray) -> float:
     """
-    Mean Squared Error (MSE)
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-
-    Returns:
-        MSE值
+    Mean Squared Error
     """
-    return np.mean((preds - trues) ** 2)
+    return float(np.mean((preds - trues) ** 2))
 
 
 def rmse(preds: np.ndarray, trues: np.ndarray) -> float:
     """
-    Root Mean Squared Error (RMSE)
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-
-    Returns:
-        RMSE值
+    Root Mean Squared Error
     """
-    return np.sqrt(mse(preds, trues))
+    return float(np.sqrt(mse(preds, trues)))
 
 
-def mape(preds: np.ndarray, trues: np.ndarray, epsilon: float = 1e-5) -> float:
+# ─────────────────────────────────────────────────────────────
+#  相对误差指标（TSLib 原始公式，无 *100）
+#  Mask 机制：过滤掉 |true| < 1e-3 的无效点
+# ─────────────────────────────────────────────────────────────
+
+def mape(preds: np.ndarray, trues: np.ndarray, mask_threshold: float = 1e-3) -> float:
     """
-    Mean Absolute Percentage Error (MAPE)
+    Mean Absolute Percentage Error（TSLib 规范，无 *100）
 
-    避免除零问题，使用 epsilon 进行平滑
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-        epsilon: 平滑常数，避免除零
-
-    Returns:
-        MAPE值 (百分比形式，如 10.5 表示 10.5%)
+    Mask 机制：
+    - 过滤掉 |true| < mask_threshold 的极小值点（避免数值爆炸）
+    - 对其余有效点取平均
     """
-    # 避免除零和极端值
-    trues_safe = np.where(np.abs(trues) < epsilon, epsilon, trues)
-    return np.mean(np.abs((trues - preds) / trues_safe)) * 100
+    mask = np.abs(trues) > mask_threshold
+    if not np.any(mask):
+        return float('nan')
+    return float(np.mean(np.abs((trues[mask] - preds[mask]) / trues[mask])))
 
 
-def mspe(preds: np.ndarray, trues: np.ndarray, epsilon: float = 1e-5) -> float:
+def mspe(preds: np.ndarray, trues: np.ndarray, mask_threshold: float = 1e-3) -> float:
     """
-    Mean Squared Percentage Error (MSPE)
+    Mean Squared Percentage Error（TSLib 规范，无 *100）
 
-    避免除零问题，使用 epsilon 进行平滑
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-        epsilon: 平滑常数，避免除零
-
-    Returns:
-        MSPE值 (百分比形式)
+    Mask 机制：
+    - 过滤掉 |true| < mask_threshold 的极小值点
     """
-    # 避免除零和极端值
-    trues_safe = np.where(np.abs(trues) < epsilon, epsilon, trues)
-    return np.mean(((trues - preds) / trues_safe) ** 2) * 100
+    mask = np.abs(trues) > mask_threshold
+    if not np.any(mask):
+        return float('nan')
+    return float(np.mean(((trues[mask] - preds[mask]) / trues[mask]) ** 2))
 
 
 def smape(preds: np.ndarray, trues: np.ndarray, epsilon: float = 1e-5) -> float:
     """
-    Symmetric Mean Absolute Percentage Error (SMAPE)
-
-    更对称的MAPE变体
-
-    Args:
-        preds: 预测值数组
-        trues: 真实值数组
-        epsilon: 平滑常数
-
-    Returns:
-        SMAPE值 (百分比形式)
+    Symmetric Mean Absolute Percentage Error
     """
     numerator = np.abs(preds - trues)
     denominator = (np.abs(preds) + np.abs(trues)) / 2
     denominator_safe = np.where(denominator < epsilon, epsilon, denominator)
-    return np.mean(numerator / denominator_safe) * 100
+    return float(np.mean(numerator / denominator_safe) * 100)
 
 
-def calculate_all_metrics(preds: np.ndarray, trues: np.ndarray,
-                         prefix: str = '') -> dict:
+# ─────────────────────────────────────────────────────────────
+#  TSLib 特有指标：RSE & CORR
+# ─────────────────────────────────────────────────────────────
+
+def rse(preds: np.ndarray, trues: np.ndarray) -> float:
     """
-    计算所有评估指标
+    Root Squared Error / 归一化 RMSE
+    RSE = sqrt(sum((pred - true)^2)) / sqrt(sum((true - mean(true))^2))
 
-    Args:
-        preds: 预测值数组，任意形状
-        trues: 真实值数组，任意形状
-        prefix: 指标名称前缀
-
-    Returns:
-        包含所有指标的字典
+    衡量预测值相对于真实值方差的标准化误差。
+    值越接近 0 越好（0 表示完美预测），接近 1 与均值预测相当。
     """
-    # 展平为1D数组进行计算
-    preds_flat = preds.flatten()
-    trues_flat = trues.flatten()
+    numerator = np.sum((trues - preds) ** 2)
+    denominator = np.sum((trues - np.mean(trues)) ** 2)
+    if denominator < 1e-10:
+        return float('nan')
+    return float(np.sqrt(numerator / denominator))
 
-    metrics = {
-        f'{prefix}MAE': mae(preds_flat, trues_flat),
-        f'{prefix}MSE': mse(preds_flat, trues_flat),
-        f'{prefix}RMSE': rmse(preds_flat, trues_flat),
-        f'{prefix}MAPE': mape(preds_flat, trues_flat),
-        f'{prefix}MSPE': mspe(preds_flat, trues_flat),
+
+def corr(preds: np.ndarray, trues: np.ndarray) -> float:
+    """
+    Pearson 相关系数
+    Corr = Cov(pred, true) / (std(pred) * std(true))
+
+    值域 [-1, 1]，越接近 1 表示正相关越强，越接近 -1 表示负相关。
+    """
+    preds_flat = preds.ravel()
+    trues_flat = trues.ravel()
+
+    preds_mean = np.mean(preds_flat)
+    trues_mean = np.mean(trues_flat)
+
+    preds_centered = preds_flat - preds_mean
+    trues_centered = trues_flat - trues_mean
+
+    cov = np.sum(preds_centered * trues_centered)
+    std_pred = np.sqrt(np.sum(preds_centered ** 2))
+    std_true = np.sqrt(np.sum(trues_centered ** 2))
+
+    if std_pred < 1e-10 or std_true < 1e-10:
+        return float('nan')
+
+    return float(cov / (std_pred * std_true))
+
+
+# ─────────────────────────────────────────────────────────────
+#  批量计算
+# ─────────────────────────────────────────────────────────────
+
+def calculate_all_metrics(preds: np.ndarray, trues: np.ndarray) -> dict:
+    """
+    计算全部评估指标（TSLib 规范）
+    所有返回值均为原生 Python float（可直接 json 序列化）
+    """
+    # 展平以便计算
+    p = preds.ravel()
+    t = trues.ravel()
+
+    return {
+        'MAE':  mae(p, t),
+        'MSE':  mse(p, t),
+        'RMSE': rmse(p, t),
+        'MAPE': mape(p, t),
+        'MSPE': mspe(p, t),
+        'SMAPE': smape(p, t),
+        'RSE':  rse(p, t),
+        'CORR': corr(p, t),
     }
 
-    return metrics
 
-
-def print_metrics(metrics: dict, decimals: int = 6):
-    """
-    格式化打印指标
-
-    Args:
-        metrics: 指标字典
-        decimals: 小数位数
-    """
-    print("\n" + "=" * 50)
-    print("Evaluation Metrics:")
-    print("=" * 50)
+def print_metrics(metrics: dict, prefix: str = ''):
+    """打印指标（保留两位小数）"""
     for key, value in metrics.items():
-        if 'MAPE' in key or 'MSPE' in key:
-            print(f"{key}: {value:.{decimals}f}%")
+        if np.isnan(value):
+            print(f"{prefix}{key}: N/A")
         else:
-            print(f"{key}: {value:.{decimals}f}")
-    print("=" * 50)
-
-
-def save_metrics_to_file(metrics: dict, filepath: str, mode: str = 'a'):
-    """
-    将指标保存到文件
-
-    Args:
-        metrics: 指标字典
-        filepath: 文件路径
-        mode: 写入模式，'a'追加，'w'覆盖
-    """
-    with open(filepath, mode) as f:
-        if mode == 'w':
-            f.write("=" * 60 + "\n")
-            f.write("PatternSearch Baseline Evaluation Results\n")
-            f.write("=" * 60 + "\n")
-
-        for key, value in metrics.items():
-            if 'MAPE' in key or 'MSPE' in key:
-                f.write(f"{key}: {value:.6f}%\n")
-            else:
-                f.write(f"{key}: {value:.6f}\n")
-
-        f.write("-" * 60 + "\n")
+            print(f"{prefix}{key}: {value:.6f}")

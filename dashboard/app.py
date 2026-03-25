@@ -145,26 +145,21 @@ def load_predictions(
     config: dict = None
 ) -> tuple:
     """
-    加载预测结果和真实值
-
-    Args:
-        output_dir: 结果目录
-        model_name: 模型名称
-        seq_len: 序列长度
-        pred_len: 预测长度
-        config: 可选的配置字典（包含模型特定参数）
+    加载预测结果、真实值、以及历史输入序列（任务7：历史上下文）
 
     Returns:
-        (preds, trues) 元组，形状 [n_samples, pred_len]
+        (preds, trues, x_test) 元组
     """
     # 生成文件名
     exp_id = _get_prediction_filename(model_name, seq_len, pred_len, config)
 
     preds_path = os.path.join(output_dir, f"{exp_id}_preds.npy")
     trues_path = os.path.join(output_dir, f"{exp_id}_trues.npy")
+    x_test_path = os.path.join(output_dir, f"{exp_id}_X_test.npy")
 
     preds = None
     trues = None
+    x_test = None
 
     if os.path.exists(preds_path):
         preds = np.load(preds_path)
@@ -172,7 +167,10 @@ def load_predictions(
     if os.path.exists(trues_path):
         trues = np.load(trues_path)
 
-    return preds, trues
+    if os.path.exists(x_test_path):
+        x_test = np.load(x_test_path)
+
+    return preds, trues, x_test
 
 
 def find_available_predictions(output_dir: str) -> List[Dict[str, Any]]:
@@ -266,7 +264,7 @@ def render_header():
 
 def render_sidebar() -> Dict[str, Any]:
     """
-    渲染侧边栏配置
+    渲染侧边栏配置（含一键启动实验面板）
 
     Returns:
         用户选择的配置字典
@@ -279,6 +277,72 @@ def render_sidebar() -> Dict[str, Any]:
         value="./results",
         help="实验结果JSON文件所在目录"
     )
+
+    # ─────────────────────────────────────────────────────────────────
+    # 任务4: 一键启动新实验（🚀 expander 面板）
+    # ─────────────────────────────────────────────────────────────────
+    with st.sidebar.expander("🚀 启动新实验", expanded=False):
+        st.markdown("**快速启动配置**")
+
+        # 模型选择
+        run_model = st.selectbox(
+            "模型",
+            options=['PatternSearch', 'LSHSearch', 'SAXSearch', 'all'],
+            index=3,
+            help="选择要运行的模型"
+        )
+
+        # 序列长度快捷选择
+        seq_presets = [24, 48, 96, 192, 336, 720]
+        run_seq_len = st.selectbox(
+            "seq_len（输入长度）",
+            options=seq_presets,
+            index=2,  # 默认 96
+            help="输入序列长度"
+        )
+
+        # 预测长度快捷选择
+        pred_presets = [24, 48, 96, 192, 336, 720]
+        run_pred_len = st.selectbox(
+            "pred_len（预测长度）",
+            options=pred_presets,
+            index=1,  # 默认 48
+            help="预测序列长度"
+        )
+
+        # GPU 选项
+        run_gpu = st.checkbox("启用 GPU 加速", value=False, help="使用 CUDA GPU（如可用）")
+
+        if st.button("▶️ 运行实验", type="primary", use_container_width=True):
+            with st.spinner(f"正在运行 {run_model} (seq={run_seq_len}, pred={run_pred_len})..."):
+                import subprocess
+                import sys
+
+                cmd = [
+                    sys.executable,
+                    os.path.join(os.path.dirname(os.path.dirname(__file__)), "run.py"),
+                    "--model", run_model,
+                    "--seq_len", str(run_seq_len),
+                    "--pred_len", str(run_pred_len),
+                ]
+                if run_gpu:
+                    cmd.append("--use_gpu")
+                if run_model != 'all':
+                    cmd.extend(["--model", run_model])
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True
+                )
+
+                if result.returncode == 0:
+                    st.success("✅ 实验完成！正在刷新...")
+                    st.rerun()
+                else:
+                    st.error(f"❌ 实验失败:\n```\n{result.stderr[-1000:]}\n```")
+
+        st.caption("💡 提示：完整参数请在终端运行 `python run.py ...`")
 
     # 可用性检查
     log_data = load_experiment_log(output_dir)
@@ -440,7 +504,7 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
             textposition='outside'
         )
 
-        st.plotly_chart(fig_mae, use_container_width=True)
+        st.plotly_chart(fig_mae, width="stretch")
 
     with col2:
         # MSE柱状图
@@ -478,7 +542,7 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
             textposition='outside'
         )
 
-        st.plotly_chart(fig_mse, use_container_width=True)
+        st.plotly_chart(fig_mse, width="stretch")
 
     # MAPE柱状图
     st.markdown("### 📈 MAPE 对比")
@@ -509,7 +573,7 @@ def render_metrics_comparison(log_data: Dict[str, Any]):
         textposition='outside'
     )
 
-    st.plotly_chart(fig_mape, use_container_width=True)
+    st.plotly_chart(fig_mape, width="stretch")
 
 
 def render_waveform_comparison(
@@ -559,7 +623,7 @@ def render_waveform_comparison(
 
     # 获取模型配置参数
     config_params = matching_exp['config'] if matching_exp else None
-    preds, trues = load_predictions(
+    preds, trues, x_test = load_predictions(
         output_dir, model, seq_len, pred_len, config_params
     )
 
@@ -626,10 +690,13 @@ def render_waveform_comparison(
             margin=dict(l=40, r=40, t=60, b=40)
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     else:
-        # 使用真实预测数据
+        # ─────────────────────────────────────────────────────────────────
+        # 任务7: 历史上下文波形（X_test 作为历史背景，与 pred_len 预测并列）
+        # X 轴设计：[-seq_len, 0) 为历史，0 为分界线，[0, pred_len] 为未来/预测
+        # ─────────────────────────────────────────────────────────────────
         st.markdown(f"### 📈 预测结果波形 (样本 #{sample_id})")
 
         # 提取指定样本
@@ -637,96 +704,127 @@ def render_waveform_comparison(
             pred_sample = preds[sample_id]
             true_sample = trues[sample_id]
 
-            # 如果是多变量，取第一个特征
+            # 多变量取第一个特征
             if pred_sample.ndim > 1:
                 pred_sample = pred_sample[:, 0]
             if true_sample.ndim > 1:
                 true_sample = true_sample[:, 0]
 
-            # 时间轴
-            x_axis = list(range(len(pred_sample)))
+            # X 轴设计：x=0 为分界线
+            # 左侧：[-seq_len, -1]（历史）
+            # 右侧：[0, pred_len-1]（未来）
+            hist_len = seq_len
+            pred_len_actual = len(pred_sample)   # = pred_len
 
-            # 创建交互式图表
+            # 历史序列（X_test）作为"过去"的 ground truth 背景
+            if x_test is not None and sample_id < len(x_test):
+                hist_sample = x_test[sample_id]
+                if hist_sample.ndim > 1:
+                    hist_sample = hist_sample[:, 0]
+            else:
+                hist_sample = None
+
             fig = go.Figure()
 
-            # 添加真实值曲线
+            # ── 历史真实波形（淡色背景，X ∈ [-seq_len, 0)）──
+            if hist_sample is not None:
+                hist_x = list(range(-hist_len, 0))
+                fig.add_trace(go.Scatter(
+                    x=hist_x,
+                    y=hist_sample.tolist(),
+                    mode='lines',
+                    name='历史真实 (History)',
+                    line=dict(color='#94C8D8', width=1.8),
+                    opacity=0.75,
+                    hovertemplate='时间: %{x}<br>历史值: %{y:.4f}<extra></extra>'
+                ))
+
+            # ── 未来真实波形（蓝色，X ∈ [0, pred_len-1]）──
+            future_x = list(range(0, pred_len_actual))
             fig.add_trace(go.Scatter(
-                x=x_axis,
+                x=future_x,
                 y=true_sample.tolist(),
                 mode='lines+markers',
-                name='真实值 (Ground Truth)',
+                name='未来真实 (Ground Truth)',
                 line=dict(color='#2E86AB', width=2.5),
-                marker=dict(size=7, symbol='circle'),
-                hovertemplate='时间点: %{x}<br>真实值: %{y:.4f}<extra></extra>'
+                marker=dict(size=6, symbol='circle'),
+                hovertemplate='时间: %{x}<br>真实值: %{y:.4f}<extra></extra>'
             ))
 
-            # 添加预测值曲线
+            # ── 预测波形（红色虚线，X ∈ [0, pred_len-1]）──
             fig.add_trace(go.Scatter(
-                x=x_axis,
+                x=future_x,
                 y=pred_sample.tolist(),
                 mode='lines+markers',
-                name='预测值 (Prediction)',
+                name='模型预测 (Prediction)',
                 line=dict(color='#E94F37', width=2.5, dash='dash'),
-                marker=dict(size=7, symbol='square'),
-                hovertemplate='时间点: %{x}<br>预测值: %{y:.4f}<extra></extra>'
+                marker=dict(size=6, symbol='square'),
+                hovertemplate='时间: %{x}<br>预测值: %{y:.4f}<extra></extra>'
             ))
 
-            # 计算误差
-            mae = np.mean(np.abs(pred_sample - true_sample))
-            mse = np.mean((pred_sample - true_sample) ** 2)
+            # ── 垂直虚线分隔历史与未来（X=0）──
+            fig.add_vline(x=0, line_dash="dot", line_color="gray", line_width=1.5)
 
-            # 添加误差区域
+            # 误差指标
+            mae = float(np.mean(np.abs(pred_sample - true_sample)))
+            mse = float(np.mean((pred_sample - true_sample) ** 2))
+
+            # ── 误差区域（预测 - 真实，填充在预测与真实之间）──
             fig.add_trace(go.Scatter(
-                x=x_axis + x_axis[::-1],
-                y=(pred_sample - true_sample).tolist() + [0] * len(x_axis),
+                x=future_x + future_x[::-1],
+                y=(pred_sample - true_sample).tolist() + [0] * len(future_x),
                 fill='toself',
-                fillcolor='rgba(233, 79, 55, 0.2)',
+                fillcolor='rgba(233, 79, 55, 0.15)',
                 line=dict(color='rgba(255,255,255,0)'),
-                name='预测误差',
-                hovertemplate='时间点: %{x}<br>误差: %{y:.4f}<extra></extra>'
+                name='预测误差带',
+                showlegend=True,
+                hovertemplate='时间: %{x}<br>误差: %{y:.4f}<extra></extra>'
             ))
 
-            # 更新布局
             fig.update_layout(
-                title=f'{model} | seq_len={seq_len} | pred_len={pred_len} | '
+                title=f'{model} | seq={seq_len} | pred={pred_len} | '
                       f'MAE={mae:.4f} | MSE={mse:.4f}',
-                xaxis_title='时间步 (Timestep)',
-                yaxis_title='值 (Value)',
+                xaxis_title='时间步（0 = 预测起点 | 负值 = 历史）',
+                yaxis_title='值',
                 template='plotly_white',
                 hovermode='x unified',
                 legend=dict(
                     orientation='h',
-                    yanchor="bottom",
+                    yanchor='bottom',
                     y=1.02,
-                    xanchor="center",
-                    x=0.5
+                    xanchor='right',
+                    x=1
                 ),
-                height=450,
+                height=500,
                 margin=dict(l=40, r=40, t=80, b=40),
                 xaxis=dict(
                     tickmode='linear',
-                    tick0=0,
-                    dtick=max(1, len(x_axis) // 10)
+                    tick0=-seq_len,
+                    dtick=max(1, (seq_len + pred_len_actual) // 12)
                 )
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
-            # 显示数值统计
+            # 数值统计
             col1, col2, col3, col4 = st.columns(4)
-
             with col1:
-                st.metric("真实值均值", f"{np.mean(true_sample):.4f}")
+                st.metric("真实值均值", f"{float(np.mean(true_sample)):.4f}")
             with col2:
-                st.metric("预测值均值", f"{np.mean(pred_sample):.4f}")
+                st.metric("预测值均值", f"{float(np.mean(pred_sample)):.4f}")
             with col3:
                 st.metric("MAE", f"{mae:.4f}")
             with col4:
                 st.metric("MSE", f"{mse:.4f}")
 
-            # 多样本对比视图
-            st.markdown("### 📊 多样本批量对比视图")
+            # ── 历史语境说明 ──
+            st.info(
+                f"📌 **历史上下文说明**：波形左侧（X < 0）为测试样本的输入历史序列（长度 {seq_len}），"
+                "右侧（X ≥ 0）为预测区间。灰色垂直虚线（X=0）为历史与未来的分界线。"
+            )
 
+            # 连续多样本对比视图
+            st.markdown("### 📊 多样本批量对比视图")
             n_multi = 5
             start_idx = max(0, sample_id - 2)
 
@@ -781,7 +879,7 @@ def render_waveform_comparison(
                 )
             )
 
-            st.plotly_chart(fig_multi, use_container_width=True)
+            st.plotly_chart(fig_multi, width="stretch")
 
         else:
             st.error(f"样本ID {sample_id} 超出范围 (有效范围: 0-{min(len(preds), len(trues))-1})")
@@ -817,11 +915,11 @@ def render_model_introduction():
     with col3:
         st.markdown("""
         ### SAXSearch
-        **符号聚合近似检索**
+        **符号聚合近似 + 最近邻检索**
 
-        - PAA 降维压缩
-        - 高斯分位数符号化
-        - 编辑距离模糊匹配
+        - PAA 降维压缩为 word_size 段
+        - 高斯分位数字符化（整数打包）
+        - sklearn NearestNeighbors 模糊匹配（PAA 空间）
         """)
 
 

@@ -57,11 +57,13 @@ MODEL_REGISTRY = {
     },
     'LSHSearch': {
         'class': None,
-        'params': ['n_hash_funcs', 'n_tables', 'hamming_radius']
+        'params': ['n_hash_funcs', 'n_tables', 'hamming_radius',
+                   'candidate_cap_per_table', 'candidate_cap_total', 'weighted']
     },
     'SAXSearch': {
         'class': None,
-        'params': ['word_size', 'alphabet_size', 'epsilon_threshold']
+        'params': ['word_size', 'alphabet_size', 'epsilon_threshold',
+                   'bucket_top_k', 'weighted']
     }
 }
 
@@ -146,14 +148,38 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         del X_train, Y_train
         gc.collect()
 
-        # 预测
-        logger.info(f"[{model_name}] 预测 {X_test.shape[0]} 样本...")
-        Y_pred = model.predict(X_test)
-        logger.info(f"[{model_name}] 预测完成: {Y_pred.shape}")
+        # ─────────────────────────────────────────────────────────────────
+        # 任务5: DLinear-style Instance-level 去均值 (Mean-Shift)
+        # 对每个测试序列减去其特征维度的均值，提升检索稳定性
+        # ─────────────────────────────────────────────────────────────────
+        seq_mean = np.mean(X_test, axis=1, keepdims=True)          # (n_test, 1, n_feat)
+        X_test_centered = (X_test - seq_mean).astype(np.float32)    # (n_test, seq_len, n_feat)
 
-        # 释放模型（预测已完成）
-        del model
+        # 预测（用中心化后的序列）
+        logger.info(f"[{model_name}] 预测 {X_test.shape[0]} 样本 (mean-shift 模式)...")
+        Y_pred_centered = model.predict(X_test_centered)             # (n_test, pred_len, n_feat)
+
+        # 释放模型和中心化输入
+        del model, X_test_centered
         gc.collect()
+
+        # 将均值加回（恢复到原始尺度预测）
+        # Y_pred_centered 是差值形式，加上对应样本的 seq_mean 即为预测值
+        Y_pred = Y_pred_centered + seq_mean
+        del Y_pred_centered, seq_mean
+        gc.collect()
+
+        # ─────────────────────────────────────────────────────────────────
+        # 任务7: 历史上下文数据落盘（同样做 mean-shift 保持一致）
+        # 保存 X_test（原始）用于 dashboard 历史语境展示
+        # ─────────────────────────────────────────────────────────────────
+        exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
+                X_test.astype(np.float32))
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"),
+                Y_pred.astype(np.float32))
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"),
+                Y_test.astype(np.float32))
 
         # ─────────────────────────────────────────────────
         # 反归一化：按“最安全模板”整段替换（避免局部变量作用域/分支风险）
@@ -223,7 +249,8 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             },
             'npy_file': {
                 'preds': f"{exp_id}_preds.npy",
-                'trues': f"{exp_id}_trues.npy"
+                'trues': f"{exp_id}_trues.npy",
+                'x_test': f"{exp_id}_X_test.npy",
             }
         }
 
@@ -249,9 +276,12 @@ def _get_default(param: str) -> Any:
         'n_hash_funcs': 16,
         'n_tables': 4,
         'hamming_radius': 2,
+        'candidate_cap_per_table': 256,
+        'candidate_cap_total': 1024,
         'word_size': 8,
         'alphabet_size': 8,
         'epsilon_threshold': 1.0,
+        'bucket_top_k': 8,
     }
     return defaults.get(param)
 
@@ -334,9 +364,13 @@ class ExperimentRunner:
         all_configs = [
             {'model_name': 'PatternSearch', 'top_k': self.args.top_k, 'weighted': self.args.weighted},
             {'model_name': 'LSHSearch', 'n_hash_funcs': self.args.n_hash_funcs,
-             'n_tables': self.args.n_tables, 'hamming_radius': self.args.hamming_radius},
+             'n_tables': self.args.n_tables, 'hamming_radius': self.args.hamming_radius,
+             'candidate_cap_per_table': self.args.candidate_cap_per_table,
+             'candidate_cap_total': self.args.candidate_cap_total,
+             'weighted': self.args.lsh_weighted},
             {'model_name': 'SAXSearch', 'word_size': self.args.word_size,
-             'alphabet_size': self.args.alphabet_size, 'epsilon_threshold': self.args.epsilon_threshold},
+             'alphabet_size': self.args.alphabet_size, 'epsilon_threshold': self.args.epsilon_threshold,
+             'bucket_top_k': self.args.bucket_top_k, 'weighted': self.args.sax_weighted},
         ]
 
         configs = _expand_configs(models, seq_lens, pred_lens, all_configs)
@@ -571,11 +605,16 @@ def parse_args():
     parser.add_argument('--n_hash_funcs', type=int, default=16)
     parser.add_argument('--n_tables', type=int, default=4)
     parser.add_argument('--hamming_radius', type=int, default=2)
+    parser.add_argument('--candidate_cap_per_table', type=int, default=256)
+    parser.add_argument('--candidate_cap_total', type=int, default=1024)
+    parser.add_argument('--lsh_weighted', type=lambda x: x.lower() == 'true', default=False)
 
     # SAXSearch
     parser.add_argument('--word_size', type=int, default=8)
     parser.add_argument('--alphabet_size', type=int, default=8)
     parser.add_argument('--epsilon_threshold', type=float, default=1.0)
+    parser.add_argument('--bucket_top_k', type=int, default=8)
+    parser.add_argument('--sax_weighted', type=lambda x: x.lower() == 'true', default=True)
 
     # 执行参数
     parser.add_argument('--parallel', action='store_true',

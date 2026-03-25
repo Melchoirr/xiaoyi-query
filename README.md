@@ -8,17 +8,23 @@
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
 ```
 
-## 重要更新 (v2.1 Bug 修复)
+## 重要更新 (v2.3 终极重构)
 
-v2.1 修复了以下关键问题：
+v2.3 全面对齐 TSLib 学术规范 + 同学极速 LSH/SAX 算法：
 
-| 问题 | 修复 |
+| 维度 | 变更 |
 |------|------|
-| `TypeError: PatternSearch.__init__() got an unexpected keyword argument 'top_k'` | `__init__` 参数名改为 `top_k`，所有模型末尾加 `**kwargs` |
-| `ValueError: non-broadcastable output operand...shape (662064,1) doesn't match...shape (662064,7)` | 移除 `Y_pred[:,:,0]` 破坏性切片；哈希桶 sum_cache 形状改为 `(pred_len, n_features)` |
-| 单模型失败导致整个脚本崩溃 | `run_single_experiment` 异常隔离，单个失败继续执行下一个 |
-| 实验失败后仪表盘未启动 | `--dashboard` 参数无论实验结果如何必定启动 |
-| 终端无进度条 | 引入 `logging` + `tqdm`，带时间戳和实验进度 |
+| **数据切分** | 废除 ratio 比例，改为 TSLib 固定边界（月/小时时间戳） |
+| **Dataloader** | `__getitem__` 返回 4 值 `(seq_x, seq_y, seq_x_mark, seq_y_mark)` 含时间特征编码 |
+| **内存** | `pd.read_csv` 后立即 `.astype(np.float32)` + `del df_data` + `gc.collect()` |
+| **评估指标** | MAPE/MSPE 移除 `*100`；新增 RSE、CORR；全部返回值 `float()` 包裹防 JSON 序列化失败 |
+| **MAPE/MSPE 鲁棒性** | Mask 机制过滤 `|true| < 1e-3` 极小值点，避免数值爆炸 |
+| **LSHSearch** | uint64 哈希打包 + Hamming 半径探针掩码 + 两阶段候选重排（精度+速度） |
+| **SAXSearch** | 整数打包符号 + `sklearn.neighbors.NearestNeighbors` 替换编辑距离（175x 加速） |
+| **新超参** | `--candidate_cap_per_table`、`--candidate_cap_total`、`--lsh_weighted`、`--bucket_top_k`、`--sax_weighted` |
+| **去均值归一化** | DLinear-style Instance Mean-Shift：每个测试序列减去特征均值再匹配 |
+| **历史上下文落盘** | `run.py` 同时保存 `*_X_test.npy`，Dashboard 显示历史波形语境 |
+| **Dashboard** | `use_container_width` → `width="stretch"`；侧边栏一键启动实验面板；历史+未来连贯波形图（X<0 为历史，X=0 分界线） |
 
 ## 使用方法
 
