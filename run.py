@@ -86,9 +86,10 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验
 
-    Bug 修复 (v2.1):
-    - 不再对 Y_pred / Y_test 强制做 [:, :, 0]，保留多变量维度
-    - inverse_transform 根据实际 n_features 动态处理 2D/3D 形状
+    v2.4 核心变更：
+    1. TSLib 指标对齐：Metrics 在归一化空间（inverse_transform 之前）计算
+    2. DLinear-style Instance Normalization（Mean-Shift）：训练/预测阶段均安全应用
+    3. Metrics 计算时机：先在归一化空间算指标 -> 再 inverse_transform -> 最后落盘
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -139,101 +140,107 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         del train_set, val_set
         gc.collect()
 
-        # 创建并训练模型
-        logger.info(f"[{model_name}] 训练...")
-        model = ModelClass(**model_params)
-        model.fit(X_train, Y_train)
+        # ============================================================
+        # 任务二（核心）：DLinear-style Instance Normalization（Mean-Shift）
+        #
+        #  DLinear 论文公式：
+        #    X_norm = X - mean(X, axis=1)           <- 按样本去均值
+        #    Y_norm = Y - mean(X, axis=1)           <- Y 也减去 X 的均值
+        #    model.fit(X_norm, Y_norm)
+        #    pred_norm = model.predict(X_test_norm)
+        #    pred = pred_norm + mean(X_test, axis=1)
+        #
+        #  安全性：keepdims=True 确保 shape (n, 1, feat) 可广播到 (n, seq/pred, feat)
+        #          强制 reshape 到 3D 消除 2D 残留导致广播错误
+        # ============================================================
 
-        # 释放训练数据
+        # 训练阶段：Mean-Shift
+        X_train_3d = X_train.reshape(X_train.shape[0], seq_len, -1) \
+            if X_train.ndim == 2 else X_train.astype(np.float32)
+        Y_train_3d = Y_train.reshape(Y_train.shape[0], pred_len, -1) \
+            if Y_train.ndim == 2 else Y_train.astype(np.float32)
+
+        X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)       # (n_train, 1, n_feat)
+        X_train_centered = (X_train_3d - X_train_mean).astype(np.float32)
+        Y_train_centered = (Y_train_3d - X_train_mean).astype(np.float32)
+
+        logger.info(f"[{model_name}] Mean-Shift 训练: X_mean={X_train_mean.shape}")
+
         del X_train, Y_train
         gc.collect()
 
-        # ─────────────────────────────────────────────────────────────────
-        # 任务5: DLinear-style Instance-level 去均值 (Mean-Shift)
-        # 对每个测试序列减去其特征维度的均值，提升检索稳定性
-        # ─────────────────────────────────────────────────────────────────
-        seq_mean = np.mean(X_test, axis=1, keepdims=True)          # (n_test, 1, n_feat)
-        X_test_centered = (X_test - seq_mean).astype(np.float32)    # (n_test, seq_len, n_feat)
+        logger.info(f"[{model_name}] 训练 (mean-shift 模式)...")
+        model = ModelClass(**model_params)
+        model.fit(X_train_centered, Y_train_centered)
 
-        # 预测（用中心化后的序列）
-        logger.info(f"[{model_name}] 预测 {X_test.shape[0]} 样本 (mean-shift 模式)...")
-        Y_pred_centered = model.predict(X_test_centered)             # (n_test, pred_len, n_feat)
-
-        # 释放模型和中心化输入
-        del model, X_test_centered
+        del X_train_3d, Y_train_3d, X_train_centered, Y_train_centered, X_train_mean
         gc.collect()
 
-        # 将均值加回（恢复到原始尺度预测）
-        # Y_pred_centered 是差值形式，加上对应样本的 seq_mean 即为预测值
-        Y_pred = Y_pred_centered + seq_mean
-        del Y_pred_centered, seq_mean
-        gc.collect()
+        # 预测阶段：Mean-Shift
+        X_test_3d = X_test.reshape(X_test.shape[0], seq_len, -1) \
+            if X_test.ndim == 2 else X_test.astype(np.float32)
+        Y_test_3d = Y_test.reshape(Y_test.shape[0], pred_len, -1) \
+            if Y_test.ndim == 2 else Y_test.astype(np.float32)
 
-        # ─────────────────────────────────────────────────────────────────
-        # 任务7: 历史上下文数据落盘（同样做 mean-shift 保持一致）
-        # 保存 X_test（原始）用于 dashboard 历史语境展示
-        # ─────────────────────────────────────────────────────────────────
+        X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)         # (n_test, 1, n_feat)
+        X_test_centered = (X_test_3d - X_test_mean).astype(np.float32)
+
+        # 落盘 X_test 原始（Dashboard 历史语境）
         exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
         np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
                 X_test.astype(np.float32))
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"),
-                Y_pred.astype(np.float32))
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"),
-                Y_test.astype(np.float32))
 
-        # ─────────────────────────────────────────────────
-        # 反归一化：按“最安全模板”整段替换（避免局部变量作用域/分支风险）
-        # ─────────────────────────────────────────────────
-        n_features = Y_test.shape[-1] if Y_test.ndim == 3 else 1
-        n_test = Y_pred.shape[0]
-        p_len = Y_pred.shape[1]
+        del X_test
+        gc.collect()
 
-        # 安全展平 (样本数 * 预测长度, 特征数)
-        Y_pred_flat = Y_pred.reshape(-1, n_features)
-        Y_test_flat = Y_test.reshape(-1, n_features)
+        # 预测（中心化空间）
+        logger.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本 (mean-shift 模式)...")
+        Y_pred_centered = model.predict(X_test_centered)                 # (n_test, pred_len, n_feat)
 
-        # 反归一化
+        del model, X_test_centered
+        gc.collect()
+
+        # 反中心化：Y_pred = Y_pred_centered + X_test_mean
+        Y_pred = (Y_pred_centered + X_test_mean).astype(np.float32)     # (n_test, pred_len, n_feat)
+        del Y_pred_centered, X_test_mean
+        gc.collect()
+
+        # ============================================================
+        # 任务一（核心）：在归一化空间计算 Metrics（TSLib 规范）
+        #
+        #  Y_pred 和 Y_test_3d 此时都在 StandardScaler 的归一化空间内，
+        #  与 TSLib 论文中的指标（0.3/0.4 量级）对齐。
+        # ============================================================
+        metrics = calculate_all_metrics(Y_pred, Y_test_3d)
+
+        elapsed = time.time() - start_time
+        logger.info(f"[{model_name}] 归一化空间 MAE={metrics.get('MAE', 0):.4f} "
+                    f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
+
+        # inverse_transform（仅用于落盘和 Dashboard 可视化）
+        n_test, p_len, n_feat = Y_pred.shape
+
+        Y_pred_flat = Y_pred.reshape(-1, n_feat)
+        Y_test_flat = Y_test_3d.reshape(-1, n_feat)
+
         Y_pred_orig = test_set.inverse_transform(Y_pred_flat)
         Y_test_orig = test_set.inverse_transform(Y_test_flat)
 
-        # 安全恢复维度
-        if n_features > 1:
-            Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_features)
-            Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_features)
-        else:
-            Y_pred_orig = Y_pred_orig.reshape(n_test, p_len)
-            Y_test_orig = Y_test_orig.reshape(n_test, p_len)
+        Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
+        Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
 
-        del test_set, Y_pred_flat, Y_test_flat, Y_pred, Y_test
+        del test_set, Y_pred_flat, Y_test_flat, Y_pred, Y_test_3d, X_test_3d, Y_test
         gc.collect()
 
-        # 计算指标
-        metrics = calculate_all_metrics(Y_pred_orig, Y_test_orig)
+        # 落盘（原始物理尺度 .npy）
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig)
+        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig)
 
-        # 生成实验ID
-        exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
-
-        # 落盘完整数据
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"),
-                Y_pred_orig.astype(np.float32))
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"),
-                Y_test_orig.astype(np.float32))
-
-        # JSON 只保留前 100 条预览
+        # JSON preview（仅前 100 条）
         MAX_PREVIEW = 100
-        if Y_pred_orig.ndim == 3:
-            preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).astype(np.float32).tolist()
-            preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).astype(np.float32).tolist()
-        else:
-            preview_pred = Y_pred_orig[:MAX_PREVIEW].astype(np.float32).tolist()
-            preview_true = Y_test_orig[:MAX_PREVIEW].astype(np.float32).tolist()
+        preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
 
-        elapsed = time.time() - start_time
-
-        logger.info(f"[{model_name}] 成功 MAE={metrics.get('MAE', 0):.4f} "
-                    f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
-
-        # 释放完整数组
         del Y_pred_orig, Y_test_orig
         gc.collect()
 
@@ -253,7 +260,6 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
                 'x_test': f"{exp_id}_X_test.npy",
             }
         }
-
     except Exception as e:
         import traceback
         logger.error(f"[{model_name}] 失败: {e}")

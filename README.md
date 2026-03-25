@@ -8,23 +8,32 @@
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
 ```
 
-## 重要更新 (v2.3 终极重构)
+## 重要更新 (v2.4 学术规范重构)
 
-v2.3 全面对齐 TSLib 学术规范 + 同学极速 LSH/SAX 算法：
+v2.4 对齐 TSLib 指标尺度 + 容错与交互体验：
 
 | 维度 | 变更 |
 |------|------|
+| **指标计算空间** | Metrics 先在归一化空间计算（对齐 TSLib 0.3/0.4 量级），再 inverse_transform 用于落盘/可视化 |
+| **Mean-Shift 广播安全** | 训练/预测两阶段均强制 `reshape to 3D` + `keepdims=True`，彻底消除 `could not broadcast` 报错 |
+| **DLinear Instance Norm** | 训练：Y -= X_mean；预测：Y_pred += X_test_mean；指标在归一化空间计算 |
+| **模型专属参数表单** | Dashboard 侧边栏根据所选模型动态显示专属参数并拼接为完整命令行 |
+| **实时终端 Log** | `subprocess.Popen` + `iter(process.stdout.readline)` + `st.code()` 容器，实时滚动显示训练进度 |
 | **数据切分** | 废除 ratio 比例，改为 TSLib 固定边界（月/小时时间戳） |
-| **Dataloader** | `__getitem__` 返回 4 值 `(seq_x, seq_y, seq_x_mark, seq_y_mark)` 含时间特征编码 |
-| **内存** | `pd.read_csv` 后立即 `.astype(np.float32)` + `del df_data` + `gc.collect()` |
-| **评估指标** | MAPE/MSPE 移除 `*100`；新增 RSE、CORR；全部返回值 `float()` 包裹防 JSON 序列化失败 |
-| **MAPE/MSPE 鲁棒性** | Mask 机制过滤 `|true| < 1e-3` 极小值点，避免数值爆炸 |
-| **LSHSearch** | uint64 哈希打包 + Hamming 半径探针掩码 + 两阶段候选重排（精度+速度） |
-| **SAXSearch** | 整数打包符号 + `sklearn.neighbors.NearestNeighbors` 替换编辑距离（175x 加速） |
+| **Dataloader** | `__getitem__` 返回 4 值含时间特征编码 |
+| **评估指标** | MAPE/MSPE 移除 `*100`；新增 RSE、CORR；全部 `float()` 包裹防 JSON 序列化 |
+| **MAPE/MSPE 鲁棒性** | Mask 机制过滤 `|true| < 1e-3` 极小值点 |
+| **LSHSearch** | uint64 哈希打包 + Hamming 半径探针掩码 + 两阶段候选重排 |
+| **SAXSearch** | 整数打包符号 + `sklearn.neighbors.NearestNeighbors` 替换编辑距离 |
 | **新超参** | `--candidate_cap_per_table`、`--candidate_cap_total`、`--lsh_weighted`、`--bucket_top_k`、`--sax_weighted` |
-| **去均值归一化** | DLinear-style Instance Mean-Shift：每个测试序列减去特征均值再匹配 |
 | **历史上下文落盘** | `run.py` 同时保存 `*_X_test.npy`，Dashboard 显示历史波形语境 |
-| **Dashboard** | `use_container_width` → `width="stretch"`；侧边栏一键启动实验面板；历史+未来连贯波形图（X<0 为历史，X=0 分界线） |
+| **Dashboard** | `use_container_width` → `width="stretch"`；侧边栏一键启动实验面板；历史+未来连贯波形图 |
+
+## 安装
+
+```bash
+pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
+```
 
 ## 使用方法
 
@@ -56,13 +65,13 @@ python run.py --skip_run --dashboard
 | `--model` | PatternSearch | 模型: PatternSearch / LSHSearch / SAXSearch / all |
 | `--seq_len` | 96 | 输入序列长度 |
 | `--pred_len` | 48 | 预测序列长度 |
-| `--features` | M | M=多变量, S=单变量（内存敏感场景建议 S） |
+| `--features` | M | M=多变量, S=单变量 |
 | `--parallel` | False | 启用并行计算（内存保护自动降级） |
 | `--n_workers` | 4 | 并行 worker 数（最大 4） |
-| `--use_gpu` | False | `torch.cuda` 可用时，推理使用 GPU（PatternSearch/LSH/SAX） |
+| `--use_gpu` | False | `torch.cuda` 可用时，推理使用 GPU |
+| `--dashboard` | False | 运行后启动可视化 |
 
 说明：`--parallel` 与 `--use_gpu` 同时开启时，多进程可能争用同一块 GPU，建议大实验单进程 `--use_gpu` 或减小 `n_workers`。
-| `--dashboard` | False | 运行后启动可视化 |
 
 ### 模型特定参数
 
@@ -71,10 +80,10 @@ python run.py --skip_run --dashboard
 python run.py --model PatternSearch --top_k 5 --weighted True
 
 # LSHSearch
-python run.py --model LSHSearch --n_hash_funcs 16 --n_tables 4
+python run.py --model LSHSearch --n_hash_funcs 16 --n_tables 4 --candidate_cap_total 1024
 
 # SAXSearch
-python run.py --model SAXSearch --word_size 8 --alphabet_size 8
+python run.py --model SAXSearch --word_size 8 --alphabet_size 8 --bucket_top_k 8
 ```
 
 ## 项目结构
@@ -84,14 +93,14 @@ python run.py --model SAXSearch --word_size 8 --alphabet_size 8
 ├── run.py                 # 统一入口（含内存保护调度器）
 ├── models/
 │   ├── PatternSearch.py   # KD-Tree KNN（float32 + gc）
-│   ├── LSHSearch.py      # 局部敏感哈希（哈希桶存均值）
-│   └── SAXSearch.py      # 符号聚合近似（预聚合压缩）
+│   ├── LSHSearch.py        # 局部敏感哈希（uint64 打包 + 两阶段重排）
+│   └── SAXSearch.py        # 符号聚合近似（NearestNeighbors 模糊匹配）
 ├── data_provider/
-│   └── data_loader.py     # 数据加载（float32 + 预分配）
+│   └── data_loader.py     # 数据加载（TSLib 固定边界 + float32 + 4值返回）
 ├── dashboard/
-│   └── app.py            # Streamlit 可视化
-└── results/               # 实验输出
-    ├── experiment_log.json  # 日志（仅标量 metrics + 前100条预览）
+│   └── app.py             # Streamlit 可视化（实时 Log + 历史波形）
+└── results/              # 实验输出
+    ├── experiment_log.json   # 日志（仅标量 metrics + 前100条预览）
     └── *_preds.npy         # 完整预测结果（float32）
 ```
 
@@ -99,9 +108,9 @@ python run.py --model SAXSearch --word_size 8 --alphabet_size 8
 
 | 模型 | 搜索精度 | 检索速度 | 特点 |
 |------|---------|---------|------|
-| PatternSearch | 精确 | O(log n) | 欧氏距离，逆距离加权 |
-| LSHSearch | 近似 | O(1) | 随机投影，哈希碰撞 |
-| SAXSearch | 模糊 | O(n) | PAA降维，编辑距离 |
+| PatternSearch | 精确 | O(log n) | 欧氏距离，逆距离加权，GPU 加速 |
+| LSHSearch | 近似 | O(1) | 随机投影，uint64 打包，两阶段重排 |
+| SAXSearch | 模糊 | O(n) | PAA 降维，NearestNeighbors 模糊匹配 |
 
 ## 内存优化（v2.0）
 
@@ -114,8 +123,8 @@ python run.py --model SAXSearch --word_size 8 --alphabet_size 8
 | 数据加载 | `data_provider/data_loader.py` | float64→float32，预分配，del+gc | ~50% 降幅 |
 | 实验调度 | `run.py` | 实验间强制 gc.collect()，JSON 截断100条 | ~1~2GB |
 | 并行保护 | `run.py` | 内存>85%回退串行，max_workers=4 | 避免峰值叠加 |
-| SAX 索引 | `models/SAXSearch.py` | 哈希桶存均值而非索引列表 | 10~100x 压缩 |
-| LSH 索引 | `models/LSHSearch.py` | 哈希桶存均值而非索引列表 | 10~100x 压缩 |
+| SAX 索引 | `models/SAXSearch.py` | 哈希桶存均值+NearestNeighbors | 10~100x 压缩 |
+| LSH 索引 | `models/LSHSearch.py` | 哈希桶存均值+候选重排 | 10~100x 压缩 |
 | NPY 落盘 | `run.py` | 完整预测只存.npy，不进JSON | JSON 体积从 MB→KB |
 
 ### 1. 数据加载（float32 + 预分配）
@@ -126,70 +135,24 @@ python run.py --model SAXSearch --word_size 8 --alphabet_size 8
 # data_loader.py
 DTYPE = np.float32
 
-# CSV 读取后立即转换为 float32，避免后续 dtype 转换
+# CSV 读取后立即转换为 float32
 raw = df_data[cols_data].values.astype(DTYPE)
 
 # 预分配而非 append 列表再转 np.array
 X_all = np.empty((n_samples, seq_len, n_feature), dtype=DTYPE)
-for i in range(n_samples):
-    X_all[i] = dataset[i][0]
 ```
 
 ### 2. 哈希桶预聚合（SAX / LSH）
 
-**原来：** 哈希桶存 `List[int]`（每个样本索引），一个桶有 1000 条样本时存 1000 个 int（4~8KB）。
-
-**现在：** 哈希桶存 `(mean_Y, count)` 元组，每个桶只存 1 个 float32 数组（`pred_len * 4 bytes`），压缩比可达 10~100x：
-
-```python
-# models/SAXSearch.py / LSHSearch.py
-# fit() 中在线累加
-self.sax_dict: Dict[str, Tuple[np.ndarray, int]] = {}
-for i, sax_str in enumerate(sax_strings):
-    if sax_str not in sum_cache:
-        sum_cache[sax_str] = np.zeros(y_dim, dtype=np.float32)
-        count_cache[sax_str] = 0
-    sum_cache[sax_str] += Y_flat[i]
-    count_cache[sax_str] += 1
-
-# 最终每个桶只存均值
-for sax_str in sum_cache:
-    cnt = count_cache[sax_str]
-    mean_Y = (sum_cache[sax_str] / cnt).astype(np.float32)
-    self.sax_dict[sax_str] = (mean_Y, cnt)
-```
+每个桶只存均值而非原始索引列表，压缩比可达 10~100x。
 
 ### 3. 实验调度 GC + JSON 截断
 
-```python
-# run.py - 每次实验后强制 GC
-result = run_single_experiment(cfg)
-self.results.append(result)
-del result   # 删除引用
-gc.collect()  # 触发垃圾回收
-
-# JSON 中只保留前 100 条预览，完整数据落盘 .npy
-MAX_PREVIEW = 100
-preview_pred = Y_pred_orig[:MAX_PREVIEW].astype(np.float32).tolist()
-```
+每次实验后强制 `gc.collect()`；JSON 中只保留前 100 条预览，完整数据落盘 `.npy`。
 
 ### 4. 并行内存保护
 
-```python
-# run.py - 动态内存检测
-MEMORY_THRESHOLD = 0.85  # 超过 85% 则回退串行
-
-def _memory_check(self) -> bool:
-    mem = psutil.virtual_memory()
-    if mem.percent / 100.0 >= self.MEMORY_THRESHOLD:
-        print(f"[警告] 内存占用 {mem.percent:.1%} >= {self.MEMORY_THRESHOLD:.1%}，回退串行")
-        return False
-    return True
-
-# 并行 worker 数限制为 4（而非 CPU 核数）
-with ProcessPoolExecutor(max_workers=min(n_workers, total, 4)) as executor:
-    ...
-```
+内存 > 85% 时自动回退串行；并行 worker 数限制为 4。
 
 ## 内存估算参考
 
@@ -199,11 +162,7 @@ with ProcessPoolExecutor(max_workers=min(n_workers, total, 4)) as executor:
 |---------|-------------|---------------|
 | 训练集 X [~26K, 96, 7] | ~55 MB | ~28 MB |
 | 训练集 Y [~26K, 48, 7] | ~27 MB | ~14 MB |
-| SAX 索引（原：索引列表） | ~80 MB | ~2 MB |
-| LSH 索引（原：索引列表） | ~80 MB | ~2 MB |
-| PatternSearch memory | ~55 MB | ~28 MB |
-| 测试集 X/Y 峰值 | ~15 MB | ~8 MB |
-| **单模型峰值合计** | **~350 MB** | **~100 MB** |
+| 单模型峰值合计 | **~350 MB** | **~100 MB** |
 | 3模型串行峰值 | ~1 GB | ~300 MB |
 | 3模型并行峰值（优化前） | **~30 GB (OOM!)** | **~4 GB (安全)** |
 

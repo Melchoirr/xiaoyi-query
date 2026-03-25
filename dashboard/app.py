@@ -279,12 +279,14 @@ def render_sidebar() -> Dict[str, Any]:
     )
 
     # ─────────────────────────────────────────────────────────────────
-    # 任务4: 一键启动新实验（🚀 expander 面板）
+    # 任务3+4: 一键启动新实验（🚀 expander 面板）
+    # - 动态模型专属参数表单
+    # - 实时终端 Log 打屏（非阻塞 Popen + st.empty 滚动更新）
     # ─────────────────────────────────────────────────────────────────
     with st.sidebar.expander("🚀 启动新实验", expanded=False):
         st.markdown("**快速启动配置**")
 
-        # 模型选择
+        # 模型选择（决定下方显示哪些专属参数）
         run_model = st.selectbox(
             "模型",
             options=['PatternSearch', 'LSHSearch', 'SAXSearch', 'all'],
@@ -292,57 +294,136 @@ def render_sidebar() -> Dict[str, Any]:
             help="选择要运行的模型"
         )
 
-        # 序列长度快捷选择
+        # ── 模型专属参数面板 ──
+        # PatternSearch
+        if run_model in ('PatternSearch', 'all'):
+            with st.expander("PatternSearch 参数", expanded=False):
+                run_top_k = st.number_input(
+                    "top_k（近邻数）", min_value=1, max_value=100,
+                    value=5, step=1,
+                    help="取最近邻的数量"
+                )
+                run_weighted_ps = st.checkbox("weighted（逆距离加权）", value=True)
+
+        # LSHSearch
+        if run_model in ('LSHSearch', 'all'):
+            with st.expander("LSHSearch 参数", expanded=False):
+                run_n_hash = st.number_input(
+                    "n_hash_funcs（哈希函数数）", min_value=1, max_value=64,
+                    value=16, step=1
+                )
+                run_n_tables = st.number_input(
+                    "n_tables（哈希表数量）", min_value=1, max_value=16,
+                    value=4, step=1
+                )
+                run_lsh_cap = st.number_input(
+                    "candidate_cap_total（候选上限）", min_value=64, max_value=4096,
+                    value=1024, step=64
+                )
+                run_lsh_weighted = st.checkbox("lsh_weighted（加权重排）", value=False)
+
+        # SAXSearch
+        if run_model in ('SAXSearch', 'all'):
+            with st.expander("SAXSearch 参数", expanded=False):
+                run_word_size = st.number_input(
+                    "word_size（词大小）", min_value=2, max_value=32,
+                    value=8, step=1
+                )
+                run_alpha_size = st.number_input(
+                    "alphabet_size（字母表大小）", min_value=2, max_value=32,
+                    value=8, step=1
+                )
+                run_bucket_k = st.number_input(
+                    "bucket_top_k（桶内近邻数）", min_value=1, max_value=32,
+                    value=8, step=1
+                )
+                run_sax_weighted = st.checkbox("sax_weighted（加权聚合）", value=True)
+
+        # ── 全局参数 ──
         seq_presets = [24, 48, 96, 192, 336, 720]
-        run_seq_len = st.selectbox(
-            "seq_len（输入长度）",
-            options=seq_presets,
-            index=2,  # 默认 96
-            help="输入序列长度"
-        )
-
-        # 预测长度快捷选择
         pred_presets = [24, 48, 96, 192, 336, 720]
-        run_pred_len = st.selectbox(
-            "pred_len（预测长度）",
-            options=pred_presets,
-            index=1,  # 默认 48
-            help="预测序列长度"
-        )
-
-        # GPU 选项
-        run_gpu = st.checkbox("启用 GPU 加速", value=False, help="使用 CUDA GPU（如可用）")
+        run_seq_len = st.selectbox("seq_len（输入长度）", options=seq_presets, index=2)
+        run_pred_len = st.selectbox("pred_len（预测长度）", options=pred_presets, index=1)
+        run_gpu = st.checkbox("启用 GPU 加速", value=False)
 
         if st.button("▶️ 运行实验", type="primary", use_container_width=True):
-            with st.spinner(f"正在运行 {run_model} (seq={run_seq_len}, pred={run_pred_len})..."):
-                import subprocess
-                import sys
+            # ─────────────────────────────────────────────────────────
+            # 任务4（核心）：实时终端 Log 打屏
+            # 使用 Popen 非阻塞 + st.empty 容器实时追加输出
+            # ─────────────────────────────────────────────────────────
+            import subprocess
+            import sys
 
-                cmd = [
-                    sys.executable,
-                    os.path.join(os.path.dirname(os.path.dirname(__file__)), "run.py"),
-                    "--model", run_model,
-                    "--seq_len", str(run_seq_len),
-                    "--pred_len", str(run_pred_len),
-                ]
-                if run_gpu:
-                    cmd.append("--use_gpu")
-                if run_model != 'all':
-                    cmd.extend(["--model", run_model])
+            cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "run.py"),
+                "--model", run_model,
+                "--seq_len", str(run_seq_len),
+                "--pred_len", str(run_pred_len),
+            ]
+            if run_gpu:
+                cmd.append("--use_gpu")
 
-                result = subprocess.run(
+            # 追加模型专属参数
+            if run_model == 'PatternSearch':
+                cmd.extend(["--top_k", str(int(run_top_k))])
+                cmd.extend(["--weighted", str(run_weighted_ps).lower()])
+            elif run_model == 'LSHSearch':
+                cmd.extend(["--n_hash_funcs", str(int(run_n_hash))])
+                cmd.extend(["--n_tables", str(int(run_n_tables))])
+                cmd.extend(["--candidate_cap_total", str(int(run_lsh_cap))])
+                cmd.extend(["--lsh_weighted", str(run_lsh_weighted).lower()])
+            elif run_model == 'SAXSearch':
+                cmd.extend(["--word_size", str(int(run_word_size))])
+                cmd.extend(["--alphabet_size", str(int(run_alpha_size))])
+                cmd.extend(["--bucket_top_k", str(int(run_bucket_k))])
+                cmd.extend(["--sax_weighted", str(run_sax_weighted).lower()])
+
+            st.info(f"执行命令: `{' '.join(cmd)}`")
+
+            # 实时 Log 容器
+            log_placeholder = st.empty()
+            log_lines: list = []
+
+            try:
+                process = subprocess.Popen(
                     cmd,
-                    capture_output=True,
-                    text=True
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
                 )
 
-                if result.returncode == 0:
-                    st.success("✅ 实验完成！正在刷新...")
-                    st.rerun()
-                else:
-                    st.error(f"❌ 实验失败:\n```\n{result.stderr[-1000:]}\n```")
+                spinner_col, log_col = st.columns([1, 3])
+                with spinner_col:
+                    spinner = spinner_placeholder = st.empty()
 
-        st.caption("💡 提示：完整参数请在终端运行 `python run.py ...`")
+                with log_col:
+                    spinner_placeholder = st.empty()
+
+                for raw_line in iter(process.stdout.readline, ''):
+                    if not raw_line:
+                        break
+                    line = raw_line.rstrip()
+                    log_lines.append(line)
+                    # 保留最近 200 行避免内存膨胀
+                    if len(log_lines) > 200:
+                        log_lines = log_lines[-200:]
+                    # 实时刷新到页面
+                    with log_placeholder.container():
+                        st.code("\n".join(log_lines[-80:]), language=None, height=300)
+
+                process.wait()
+
+                with log_placeholder.container():
+                    if process.returncode == 0:
+                        st.success("✅ 实验完成！正在刷新页面...")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ 实验失败（exit {process.returncode}）")
+                        st.code("\n".join(log_lines[-50:]), language=None, height=200)
+            except Exception as ex:
+                st.error(f"❌ 启动失败: {ex}")
 
     # 可用性检查
     log_data = load_experiment_log(output_dir)
