@@ -1,6 +1,6 @@
 """绘制测试集上 DLinear / PatchTST / XGBFusion 预测对比图。
 
-每个通道一行，展示 seq_len(336) 的输入上下文 + pred_len(96) 的预测曲线。
+每个通道一行，展示 seq_len(512) 的输入上下文 + pred_len(96) 的预测曲线。
 选取 3 个代表性样本（前期/中期/后期）。
 """
 import numpy as np
@@ -9,10 +9,10 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
 # ---- 配置 ----
-SEQ_LEN = 336
+SEQ_LEN = 512
 PRED_LEN = 96
 RESULT_BASE = './forecast/results'
-SETTING_TPL = '{model}_ETTh1_M_sl336_pl96'
+SETTING_TPL = '{model}_ETTh1_M_sl512_pl96'
 MODELS = ['DLinear', 'PatchTST']
 RAW_PATH = './dataset/ETTh1.csv'
 CHANNELS = ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']

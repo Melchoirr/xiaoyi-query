@@ -12,7 +12,7 @@ from tqdm import tqdm
 # ================= 配置 =================
 DATA_DIR = "./dataset"
 MODEL_ID = "thuml/sundial-base-128m"
-SEQ_LEN = 336
+SEQ_LEN = 512
 BATCH_SIZE = 32
 # ⚠️ 官方示例核心参数：采样次数
 # 设为 1 速度最快；设为 20 精度更高 (会对这 20 条结果取平均)

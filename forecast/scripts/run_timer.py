@@ -12,7 +12,7 @@ from tqdm import tqdm
 # ================= 配置 =================
 DATA_DIR = "./dataset"
 MODEL_ID = "thuml/timer-base-84m"
-SEQ_LEN = 336
+SEQ_LEN = 512
 BATCH_SIZE = 32
 # =======================================
 

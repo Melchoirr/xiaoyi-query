@@ -138,7 +138,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
-                if self.args.model in ('Sundial', 'Chronos', 'Timer', 'TimesFM'):
+                if self.args.model in ('Sundial', 'Chronos', 'Timer', 'Moirai'):
                     outputs = self.model.predict(batch_x)
                     outputs = torch.from_numpy(outputs).float()
                 else:

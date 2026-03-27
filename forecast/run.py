@@ -11,7 +11,7 @@ def main():
                         help='single: 单模型训练/测试; fusion: XGBoost 融合')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST', 'Sundial', 'Chronos', 'Timer', 'TimesFM'])
+                        choices=['DLinear', 'PatchTST', 'Sundial', 'Chronos', 'Timer', 'Moirai'])
     parser.add_argument('--fusion_models', type=str,
                         default='DLinear,PatchTST',
                         help='fusion 模式下参与融合的模型，逗号分隔')
@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--result_path', type=str, default='./forecast/results/')
 
     # forecasting task
-    parser.add_argument('--seq_len', type=int, default=96)
+    parser.add_argument('--seq_len', type=int, default=512)
     parser.add_argument('--label_len', type=int, default=48)
     parser.add_argument('--pred_len', type=int, default=96)
 
@@ -59,9 +59,9 @@ def main():
 
     # Foundation model configs
     parser.add_argument('--sundial_model', type=str, default='thuml/sundial-base-128m')
-    parser.add_argument('--chronos_model', type=str, default='amazon/chronos-bolt-small')
+    parser.add_argument('--chronos_model', type=str, default='amazon/chronos-2')
     parser.add_argument('--timer_model', type=str, default='thuml/timer-base-84m')
-    parser.add_argument('--timesfm_model', type=str, default='google/timesfm-2.0-500m-pytorch')
+    parser.add_argument('--moirai_model', type=str, default='Salesforce/moirai-1.1-R-base')
 
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
@@ -100,7 +100,7 @@ def main():
         args.fc_dropout = args.dropout
 
     # Foundation model device config
-    ZERO_SHOT_MODELS = ('Sundial', 'Chronos', 'Timer', 'TimesFM')
+    ZERO_SHOT_MODELS = ('Sundial', 'Chronos', 'Timer', 'Moirai')
     if args.model in ZERO_SHOT_MODELS:
         if args.use_gpu and torch.cuda.is_available():
             args.device = f'cuda:{args.gpu}'
