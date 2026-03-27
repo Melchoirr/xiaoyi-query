@@ -20,7 +20,12 @@ env/
 .DS_Store
 Thumbs.db
 
-# Model checkpoints
+# Data
+dataset/
+ETT_data/
+
+# Model results & checkpoints
+forecast/results/
 checkpoints/
 
 # Logs

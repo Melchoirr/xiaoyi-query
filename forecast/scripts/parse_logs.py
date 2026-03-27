@@ -1,7 +1,7 @@
 """Parse experiment logs and generate a CSV summary.
 
 Scans forecast/logs/*.log for lines matching:
-    RESULT|<setting>|mse=...|mae=...|rmse=...|mape=...|mspe=...
+    RESULT|<setting>|<split>|mse=...|mae=...|rmse=...|mape=...|mspe=...
 
 Setting format: {model}_{data}_{features}_sl{seq_len}_pl{pred_len}
 
@@ -20,6 +20,7 @@ from pathlib import Path
 RESULT_PATTERN = re.compile(
     r'^RESULT\|'
     r'(?P<setting>[^|]+)\|'
+    r'(?P<split>[^|]+)\|'
     r'mse=(?P<mse>[\d.]+)\|'
     r'mae=(?P<mae>[\d.]+)\|'
     r'rmse=(?P<rmse>[\d.]+)\|'
@@ -31,7 +32,7 @@ SETTING_PATTERN = re.compile(
     r'^(?P<model>[^_]+)_(?P<data>[^_]+)_(?P<features>[^_]+)_sl(?P<seq_len>\d+)_pl(?P<pred_len>\d+)$'
 )
 
-COLUMNS = ['model', 'data', 'features', 'seq_len', 'pred_len', 'mse', 'mae', 'rmse', 'mape', 'mspe']
+COLUMNS = ['model', 'data', 'features', 'seq_len', 'pred_len', 'split', 'mse', 'mae', 'rmse', 'mape', 'mspe']
 METRICS = ['mse', 'mae', 'rmse', 'mape', 'mspe']
 
 
@@ -51,6 +52,7 @@ def parse_log(filepath: Path) -> list[dict]:
             'features': sm.group('features'),
             'seq_len': int(sm.group('seq_len')),
             'pred_len': int(sm.group('pred_len')),
+            'split': m.group('split'),
         }
         for metric in METRICS:
             row[metric] = float(m.group(metric))
@@ -86,7 +88,7 @@ def main():
             print(f'  {f.name}: no RESULT lines found')
 
     # Sort: model -> data -> pred_len
-    all_rows.sort(key=lambda r: (r['model'], r['data'], r['pred_len']))
+    all_rows.sort(key=lambda r: (r['model'], r['data'], r['pred_len'], r['split']))
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

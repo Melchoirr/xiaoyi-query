@@ -7,6 +7,7 @@ class Model(nn.Module):
     """Sundial foundation model wrapper for zero-shot forecasting.
     Uses thuml/sundial-base-128m from HuggingFace.
     Channel-independent: processes each variate separately.
+    generate() auto-applies RevIN, so input does NOT need manual normalization.
     """
     def __init__(self, configs):
         super().__init__()
@@ -14,20 +15,20 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.enc_in = configs.enc_in
         self.model_name = getattr(configs, 'sundial_model', 'thuml/sundial-base-128m')
-        self.device = getattr(configs, 'device', 'cpu')
+        self.num_samples = 20
 
-        self._pipeline = None
+        self._model = None
         self._loaded = False
 
     def _load_model(self):
         if self._loaded:
             return
-        from transformers import pipeline
-        self._pipeline = pipeline(
-            "time-series-forecasting",
-            model=self.model_name,
-            device=self.device,
+        from transformers import AutoModelForCausalLM
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
         )
+        self._model.eval()
         self._loaded = True
 
     def forward(self, x):
@@ -36,32 +37,30 @@ class Model(nn.Module):
     @torch.no_grad()
     def predict(self, x):
         """
-        x: [B, L, C] numpy array or torch tensor (already scaled)
+        x: [B, L, C] torch tensor (already scaled by StandardScaler)
         Returns: [B, pred_len, C] numpy array
         """
         self._load_model()
 
         if isinstance(x, torch.Tensor):
-            x = x.cpu().numpy()
+            x_np = x.cpu().numpy()
+        else:
+            x_np = x
 
-        B, L, C = x.shape
+        B, L, C = x_np.shape
         predictions = np.zeros((B, self.pred_len, C))
 
         for c in range(C):
-            for b in range(B):
-                series = x[b, :, c].tolist()
-                output = self._pipeline(
-                    series,
-                    prediction_length=self.pred_len,
-                )
-                # pipeline returns list of dicts with 'mean' key
-                if isinstance(output, list) and len(output) > 0:
-                    if isinstance(output[0], dict) and 'mean' in output[0]:
-                        pred = np.array(output[0]['mean'])[:self.pred_len]
-                    else:
-                        pred = np.array(output[0])[:self.pred_len]
-                else:
-                    pred = np.zeros(self.pred_len)
-                predictions[b, :len(pred), c] = pred
+            # Sundial expects [B, L] float tensor
+            seqs = torch.tensor(x_np[:, :, c], dtype=torch.float32)
+            # output: [B, num_samples, pred_len]
+            output = self._model.generate(
+                seqs,
+                max_new_tokens=self.pred_len,
+                num_samples=self.num_samples,
+            )
+            # take mean across samples as point forecast
+            point_forecast = output.mean(dim=1)  # [B, pred_len]
+            predictions[:, :, c] = point_forecast.cpu().numpy()
 
         return predictions

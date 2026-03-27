@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from forecast.layers.RevIN import RevIN
 
 
 class moving_avg(nn.Module):
@@ -35,6 +36,10 @@ class Model(nn.Module):
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
 
+        self.use_revin = getattr(configs, 'revin', False)
+        if self.use_revin:
+            self.revin = RevIN(configs.enc_in)
+
         kernel_size = 25
         self.decompsition = series_decomp(kernel_size)
         self.individual = configs.individual
@@ -52,6 +57,8 @@ class Model(nn.Module):
 
     def forward(self, x):
         # x: [B, L, C]
+        if self.use_revin:
+            x = self.revin.normalize(x)
         seasonal_init, trend_init = self.decompsition(x)
         seasonal_init, trend_init = seasonal_init.permute(0, 2, 1), trend_init.permute(0, 2, 1)
         # [B, C, L]
@@ -69,4 +76,7 @@ class Model(nn.Module):
             trend_output = self.Linear_Trend(trend_init)
 
         x = seasonal_output + trend_output
-        return x.permute(0, 2, 1)  # [B, pred_len, C]
+        x = x.permute(0, 2, 1)  # [B, pred_len, C]
+        if self.use_revin:
+            x = self.revin.denormalize(x)
+        return x

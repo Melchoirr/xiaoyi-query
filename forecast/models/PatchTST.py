@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from forecast.layers.Embed import PatchEmbedding
+from forecast.layers.RevIN import RevIN
 
 
 class Model(nn.Module):
@@ -10,6 +11,10 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.enc_in = configs.enc_in
 
+        self.use_revin = getattr(configs, 'revin', False)
+        if self.use_revin:
+            self.revin = RevIN(configs.enc_in)
+
         self.patch_len = configs.patch_len
         self.stride = configs.stride
         self.d_model = configs.d_model
@@ -17,6 +22,8 @@ class Model(nn.Module):
         self.e_layers = configs.e_layers
         self.d_ff = configs.d_ff
         self.dropout = configs.dropout
+        self.fc_dropout_rate = getattr(configs, 'fc_dropout', configs.dropout)
+        self.head_dropout_rate = getattr(configs, 'head_dropout', 0.0)
 
         # calculate number of patches
         self.padding = self.stride
@@ -28,23 +35,25 @@ class Model(nn.Module):
             padding=self.padding, dropout=self.dropout
         )
 
-        # transformer encoder
+        # transformer encoder (uses fc_dropout for feedforward layers)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.d_model,
             nhead=self.n_heads,
             dim_feedforward=self.d_ff,
-            dropout=self.dropout,
+            dropout=self.fc_dropout_rate,
             activation='gelu',
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.e_layers)
 
-        # prediction head
+        # prediction head (uses head_dropout)
         self.head = nn.Linear(self.patch_num * self.d_model, self.pred_len)
-        self.head_dropout = nn.Dropout(self.dropout)
+        self.head_dropout = nn.Dropout(self.head_dropout_rate)
 
     def forward(self, x):
         # x: [B, L, C]
+        if self.use_revin:
+            x = self.revin.normalize(x)
         B, L, C = x.shape
 
         # patch embedding (channel-independent)
@@ -61,5 +70,7 @@ class Model(nn.Module):
         # reshape back
         x_out = x_out.reshape(B, C, self.pred_len)  # [B, C, pred_len]
         x_out = x_out.permute(0, 2, 1)  # [B, pred_len, C]
+        if self.use_revin:
+            x_out = self.revin.denormalize(x_out)
 
         return x_out

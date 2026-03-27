@@ -42,6 +42,11 @@ def adjust_learning_rate(optimizer, epoch, args):
             2: 5e-5, 4: 1e-5, 6: 5e-6, 8: 1e-6,
             10: 5e-7, 15: 1e-7, 20: 5e-8
         }
+    elif args.lradj == 'type3':
+        lr_adjust = {epoch: args.learning_rate if epoch < 3
+                     else args.learning_rate * (0.9 ** ((epoch - 3) // 1))}
+    elif args.lradj == 'constant':
+        lr_adjust = {epoch: args.learning_rate}
     else:
         return
     if epoch in lr_adjust:

@@ -125,15 +125,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         preds = []
         trues = []
 
-        if flag == 'val':
-            result_path = os.path.join(self.args.result_path, setting, 'val')
+        if flag in ('val', 'train'):
+            result_path = os.path.join(self.args.result_path, setting, flag)
         else:
             result_path = os.path.join(self.args.result_path, setting)
         os.makedirs(result_path, exist_ok=True)
 
         self.model.eval()
+        from tqdm import tqdm
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(tqdm(test_loader, desc=flag, ncols=80, ascii=True)):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
@@ -157,7 +158,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print(f'mse:{mse:.4f}, mae:{mae:.4f}')
-        print(f'RESULT|{setting}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}')
+        print(f'RESULT|{setting}|{flag}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}')
 
         np.save(os.path.join(result_path, 'pred.npy'), preds)
         np.save(os.path.join(result_path, 'true.npy'), trues)

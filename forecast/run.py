@@ -13,14 +13,16 @@ def main():
     parser.add_argument('--model', type=str, default='DLinear',
                         choices=['DLinear', 'PatchTST', 'Sundial', 'Chronos', 'Timer', 'TimesFM'])
     parser.add_argument('--fusion_models', type=str,
-                        default='DLinear,PatchTST,Sundial,Chronos,Timer,TimesFM',
+                        default='DLinear,PatchTST',
                         help='fusion 模式下参与融合的模型，逗号分隔')
     parser.add_argument('--save_val_pred', action='store_true', default=False,
                         help='测试后额外保存 val 集预测（供 fusion 使用）')
+    parser.add_argument('--save_train_pred', action='store_true', default=False,
+                        help='测试后额外保存 train 集预测（供 fusion 使用）')
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1')
-    parser.add_argument('--root_path', type=str, default='./ETT_data/')
+    parser.add_argument('--root_path', type=str, default='./dataset/')
     parser.add_argument('--data_path', type=str, default='ETTh1.csv')
     parser.add_argument('--features', type=str, default='M',
                         help='M: multivariate, S: univariate, MS: multivariate predict univariate')
@@ -39,6 +41,8 @@ def main():
     parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
     parser.add_argument('--individual', action='store_true', default=False,
                         help='DLinear individual channel')
+    parser.add_argument('--revin', action='store_true', default=False,
+                        help='enable Reversible Instance Normalization')
 
     # PatchTST config
     parser.add_argument('--d_model', type=int, default=128)
@@ -48,6 +52,10 @@ def main():
     parser.add_argument('--patch_len', type=int, default=16)
     parser.add_argument('--stride', type=int, default=8)
     parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--fc_dropout', type=float, default=None,
+                        help='fully-connected dropout (default: same as --dropout)')
+    parser.add_argument('--head_dropout', type=float, default=0.0,
+                        help='prediction head dropout')
 
     # Foundation model configs
     parser.add_argument('--sundial_model', type=str, default='thuml/sundial-base-128m')
@@ -57,7 +65,7 @@ def main():
 
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--patience', type=int, default=3)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--lradj', type=str, default='type1')
@@ -86,6 +94,10 @@ def main():
             args.data_path = default_path
         if args.freq == 'h' and default_freq != 'h':
             args.freq = default_freq
+
+    # fc_dropout defaults to dropout if not specified
+    if args.fc_dropout is None:
+        args.fc_dropout = args.dropout
 
     # Foundation model device config
     ZERO_SHOT_MODELS = ('Sundial', 'Chronos', 'Timer', 'TimesFM')
@@ -121,7 +133,13 @@ def main():
 
         if args.save_val_pred:
             print(f'>>>>>>>saving val predictions : {setting}<<<<<<<<<<<<<<<<<<')
-            exp.test(setting, test=1, flag='val')
+            load_ckpt = 0 if args.model in ZERO_SHOT_MODELS else 1
+            exp.test(setting, test=load_ckpt, flag='val')
+
+        if args.save_train_pred:
+            print(f'>>>>>>>saving train predictions : {setting}<<<<<<<<<<<<<<<<<<')
+            load_ckpt = 0 if args.model in ZERO_SHOT_MODELS else 1
+            exp.test(setting, test=load_ckpt, flag='train')
 
     print('Done!')
 
