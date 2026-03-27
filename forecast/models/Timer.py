@@ -19,8 +19,7 @@ class Model(nn.Module):
             return
         from transformers import AutoModelForCausalLM
         self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_name, trust_remote_code=True,
-            torch_dtype='auto',
+            self.model_name, trust_remote_code=True, torch_dtype='auto',
         ).to(self.device_str)
         self._model.eval()
         self._loaded = True
@@ -37,8 +36,11 @@ class Model(nn.Module):
             x_np = x
         B, L, C = x_np.shape
         flat = x_np.transpose(0, 2, 1).reshape(B * C, L)
-        batch_tensor = torch.from_numpy(flat).to(device=self.device_str, dtype=self._model.dtype)
 
-        outputs = self._model.generate(batch_tensor, max_new_tokens=self.pred_len)
+        # 照搬 run_timer.py: 先 float32 上设备，再转 model.dtype
+        inputs_tensor = torch.tensor(flat, dtype=torch.float32).to(self.device_str)
+        batch_in = inputs_tensor.to(self._model.dtype)
+
+        outputs = self._model.generate(batch_in, max_new_tokens=self.pred_len)
         result = outputs[:, -self.pred_len:].float().cpu().numpy()
         return result.reshape(B, C, self.pred_len).transpose(0, 2, 1)
