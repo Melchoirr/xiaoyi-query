@@ -4,10 +4,6 @@ import numpy as np
 
 
 class Model(nn.Module):
-    """Moirai-2.0 foundation model wrapper for zero-shot forecasting.
-    Uses Salesforce/moirai-2.0-R-small via uni2ts library.
-    Channel-independent: processes each variate separately.
-    """
     def __init__(self, configs):
         super().__init__()
         self.seq_len = configs.seq_len
@@ -15,7 +11,6 @@ class Model(nn.Module):
         self.enc_in = configs.enc_in
         self.model_name = getattr(configs, 'moirai_model', 'Salesforce/moirai-2.0-R-small')
         self.device_str = getattr(configs, 'device', 'cpu')
-
         self._model = None
         self._loaded = False
 
@@ -35,21 +30,15 @@ class Model(nn.Module):
         self._loaded = True
 
     def forward(self, x):
-        raise NotImplementedError("Moirai is inference-only. Use predict() instead.")
+        raise NotImplementedError("Use predict()")
 
     @torch.no_grad()
     def predict(self, x):
-        """
-        x: [B, L, C] torch tensor (already scaled)
-        Returns: [B, pred_len, C] numpy array
-        """
         self._load_model()
-
         if isinstance(x, torch.Tensor):
             x_np = x.cpu().numpy()
         else:
             x_np = x
-
         B, L, C = x_np.shape
         predictions = np.zeros((B, self.pred_len, C))
 
@@ -57,7 +46,7 @@ class Model(nn.Module):
             # past_target: list of [seq_len, 1]
             past_target = [x_np[b, :, c:c+1] for b in range(B)]
             pred = self._model.predict(past_target=past_target)
-            # pred: [B, n_quantiles, pred_len] -> take median
+            # [B, n_quantiles, pred_len] -> 取中位数
             median_idx = pred.shape[1] // 2
             predictions[:, :, c] = pred[:, median_idx, :]
 

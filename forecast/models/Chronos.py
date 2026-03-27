@@ -4,9 +4,6 @@ import numpy as np
 
 
 class Model(nn.Module):
-    """Chronos-2 foundation model wrapper for zero-shot forecasting.
-    Uses amazon/chronos-2 with native multivariate support.
-    """
     def __init__(self, configs):
         super().__init__()
         self.seq_len = configs.seq_len
@@ -14,7 +11,6 @@ class Model(nn.Module):
         self.enc_in = configs.enc_in
         self.model_name = getattr(configs, 'chronos_model', 'amazon/chronos-2')
         self.device_str = getattr(configs, 'device', 'cpu')
-
         self._pipeline = None
         self._loaded = False
 
@@ -30,29 +26,21 @@ class Model(nn.Module):
         self._loaded = True
 
     def forward(self, x):
-        raise NotImplementedError("Chronos is inference-only. Use predict() instead.")
+        raise NotImplementedError("Use predict()")
 
     @torch.no_grad()
     def predict(self, x):
-        """
-        x: [B, L, C] torch tensor (already scaled)
-        Returns: [B, pred_len, C] numpy array
-        """
         self._load_model()
-
         if isinstance(x, torch.Tensor):
-            x_tensor = x.cpu()
+            x_np = x.cpu().numpy()
         else:
-            x_tensor = torch.from_numpy(x)
+            x_np = x
+        B, L, C = x_np.shape
+        # Chronos-2 原生多变量: [B, C, L]
+        batch_tensor = torch.from_numpy(x_np.transpose(0, 2, 1))
 
-        # Chronos-2 expects [B, C, L]
-        x_input = x_tensor.transpose(1, 2).float()
-
-        predictions = self._pipeline.predict(
-            x_input,
-            prediction_length=self.pred_len,
-        )
-        # predictions: list of [C, n_quantiles, pred_len] tensors
+        predictions = self._pipeline.predict(batch_tensor, prediction_length=self.pred_len)
+        # list of [C, n_quantiles, pred_len] tensors
         stacked = torch.stack(predictions)  # [B, C, n_quantiles, pred_len]
         n_quantiles = stacked.shape[2]
         median_idx = n_quantiles // 2
