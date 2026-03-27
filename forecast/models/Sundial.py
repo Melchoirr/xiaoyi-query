@@ -5,9 +5,7 @@ import numpy as np
 
 class Model(nn.Module):
     """Sundial foundation model wrapper for zero-shot forecasting.
-    Uses thuml/sundial-base-128m from HuggingFace.
-    Channel-independent: processes each variate separately.
-    generate() auto-applies RevIN, so input does NOT need manual normalization.
+    Uses thuml/sundial-base-128m. Channel-independent via batch flattening.
     """
     def __init__(self, configs):
         super().__init__()
@@ -16,6 +14,7 @@ class Model(nn.Module):
         self.enc_in = configs.enc_in
         self.model_name = getattr(configs, 'sundial_model', 'thuml/sundial-base-128m')
         self.num_samples = 20
+        self.device_str = getattr(configs, 'device', 'cpu')
 
         self._model = None
         self._loaded = False
@@ -27,7 +26,8 @@ class Model(nn.Module):
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             trust_remote_code=True,
-        )
+            torch_dtype='auto',
+        ).to(self.device_str)
         self._model.eval()
         self._loaded = True
 
@@ -37,7 +37,7 @@ class Model(nn.Module):
     @torch.no_grad()
     def predict(self, x):
         """
-        x: [B, L, C] torch tensor (already scaled by StandardScaler)
+        x: [B, L, C] torch tensor (already scaled)
         Returns: [B, pred_len, C] numpy array
         """
         self._load_model()
@@ -48,19 +48,22 @@ class Model(nn.Module):
             x_np = x
 
         B, L, C = x_np.shape
-        predictions = np.zeros((B, self.pred_len, C))
+        # Flatten channels: [B, L, C] -> [B*C, L]
+        flat = x_np.transpose(0, 2, 1).reshape(B * C, L)
+        batch_tensor = torch.from_numpy(flat).to(
+            device=self.device_str, dtype=self._model.dtype
+        )
 
-        for c in range(C):
-            # Sundial expects [B, L] float tensor
-            seqs = torch.tensor(x_np[:, :, c], dtype=torch.float32)
-            # output: [B, num_samples, pred_len]
-            output = self._model.generate(
-                seqs,
-                max_new_tokens=self.pred_len,
-                num_samples=self.num_samples,
-            )
-            # take mean across samples as point forecast
-            point_forecast = output.mean(dim=1)  # [B, pred_len]
-            predictions[:, :, c] = point_forecast.cpu().numpy()
+        forecast = self._model.generate(
+            batch_tensor,
+            max_new_tokens=self.pred_len,
+            num_samples=self.num_samples,
+            do_sample=False,
+        )
+        # [B*C, num_samples, pred_len] or [B*C, pred_len]
+        forecast = forecast[..., -self.pred_len:]
+        if forecast.ndim == 3:
+            forecast = forecast.mean(dim=1)
 
-        return predictions
+        result = forecast.float().cpu().numpy()  # [B*C, pred_len]
+        return result.reshape(B, C, self.pred_len).transpose(0, 2, 1)  # [B, pred_len, C]

@@ -4,16 +4,15 @@ import numpy as np
 
 
 class Model(nn.Module):
-    """Chronos foundation model wrapper for zero-shot forecasting.
-    Supports both Chronos-Bolt and Chronos-T5 variants.
-    Channel-independent: processes each variate separately.
+    """Chronos-2 foundation model wrapper for zero-shot forecasting.
+    Uses amazon/chronos-2 with native multivariate support.
     """
     def __init__(self, configs):
         super().__init__()
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.enc_in = configs.enc_in
-        self.model_name = getattr(configs, 'chronos_model', 'amazon/chronos-bolt-small')
+        self.model_name = getattr(configs, 'chronos_model', 'amazon/chronos-2')
         self.device_str = getattr(configs, 'device', 'cpu')
 
         self._pipeline = None
@@ -22,8 +21,8 @@ class Model(nn.Module):
     def _load_model(self):
         if self._loaded:
             return
-        from chronos import BaseChronosPipeline
-        self._pipeline = BaseChronosPipeline.from_pretrained(
+        from chronos import Chronos2Pipeline
+        self._pipeline = Chronos2Pipeline.from_pretrained(
             self.model_name,
             device_map=self.device_str,
             torch_dtype=torch.float32,
@@ -42,24 +41,20 @@ class Model(nn.Module):
         self._load_model()
 
         if isinstance(x, torch.Tensor):
-            x_np = x.cpu().numpy()
+            x_tensor = x.cpu()
         else:
-            x_np = x
+            x_tensor = torch.from_numpy(x)
 
-        B, L, C = x_np.shape
-        predictions = np.zeros((B, self.pred_len, C))
+        # Chronos-2 expects [B, C, L]
+        x_input = x_tensor.transpose(1, 2).float()
 
-        for c in range(C):
-            # prepare batch of univariate series for this channel
-            context = [torch.tensor(x_np[b, :, c], dtype=torch.float32) for b in range(B)]
-
-            quantiles, mean = self._pipeline.predict_quantiles(
-                context,
-                prediction_length=self.pred_len,
-                quantile_levels=[0.5],
-            )
-            # mean: [B, pred_len]
-            mean_np = mean.numpy() if isinstance(mean, torch.Tensor) else np.array(mean)
-            predictions[:, :, c] = mean_np[:, :self.pred_len]
-
-        return predictions
+        predictions = self._pipeline.predict(
+            x_input,
+            prediction_length=self.pred_len,
+        )
+        # predictions: list of [C, n_quantiles, pred_len] tensors
+        stacked = torch.stack(predictions)  # [B, C, n_quantiles, pred_len]
+        n_quantiles = stacked.shape[2]
+        median_idx = n_quantiles // 2
+        result = stacked[:, :, median_idx, :].cpu().numpy()  # [B, C, pred_len]
+        return result.transpose(0, 2, 1)  # [B, pred_len, C]

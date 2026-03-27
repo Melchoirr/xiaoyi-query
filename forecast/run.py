@@ -61,7 +61,7 @@ def main():
     parser.add_argument('--sundial_model', type=str, default='thuml/sundial-base-128m')
     parser.add_argument('--chronos_model', type=str, default='amazon/chronos-2')
     parser.add_argument('--timer_model', type=str, default='thuml/timer-base-84m')
-    parser.add_argument('--moirai_model', type=str, default='Salesforce/moirai-1.1-R-base')
+    parser.add_argument('--moirai_model', type=str, default='Salesforce/moirai-2.0-R-small')
 
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)

@@ -4,9 +4,8 @@ import numpy as np
 
 
 class Model(nn.Module):
-    """Timer foundation model wrapper for zero-shot forecasting.
-    Uses thuml/timer-base-84m from HuggingFace.
-    Channel-independent: processes each variate separately.
+    """Timer-XL foundation model wrapper for zero-shot forecasting.
+    Uses thuml/timer-base-84m. Channel-independent via batch flattening.
     """
     def __init__(self, configs):
         super().__init__()
@@ -14,6 +13,7 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.enc_in = configs.enc_in
         self.model_name = getattr(configs, 'timer_model', 'thuml/timer-base-84m')
+        self.device_str = getattr(configs, 'device', 'cpu')
 
         self._model = None
         self._loaded = False
@@ -25,7 +25,8 @@ class Model(nn.Module):
         self._model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             trust_remote_code=True,
-        )
+            torch_dtype='auto',
+        ).to(self.device_str)
         self._model.eval()
         self._loaded = True
 
@@ -46,13 +47,16 @@ class Model(nn.Module):
             x_np = x
 
         B, L, C = x_np.shape
-        predictions = np.zeros((B, self.pred_len, C))
+        # Flatten channels: [B, L, C] -> [B*C, L]
+        flat = x_np.transpose(0, 2, 1).reshape(B * C, L)
+        batch_tensor = torch.from_numpy(flat).to(
+            device=self.device_str, dtype=self._model.dtype
+        )
 
-        for c in range(C):
-            # Timer expects [B, L] float tensor
-            seqs = torch.tensor(x_np[:, :, c], dtype=torch.float32)
-            output = self._model.generate(seqs, max_new_tokens=self.pred_len)
-            # output: [B, pred_len]
-            predictions[:, :, c] = output.cpu().numpy()
-
-        return predictions
+        outputs = self._model.generate(
+            batch_tensor,
+            max_new_tokens=self.pred_len,
+            do_sample=False,
+        )
+        result = outputs[:, -self.pred_len:].float().cpu().numpy()  # [B*C, pred_len]
+        return result.reshape(B, C, self.pred_len).transpose(0, 2, 1)  # [B, pred_len, C]
