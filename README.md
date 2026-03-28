@@ -5,24 +5,21 @@
 ## 安装
 
 ```bash
-pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm
+pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm matplotlib pandas
 ```
 
-## 重要更新 (v2.9 全物理尺度落盘 + 彻底解决缓存脏读)
-
-v2.9 / v2.8 对齐 TSLib 指标尺度 + 全物理尺度 Dashboard UI：
+## 重要更新 (v3.0 Dual-Dimension RevIN + 静态可视化)
 
 | 变更类型 | 变更内容 |
 |---------|---------|
-| **全物理尺度落盘（v2.9 新增）** | preview `history / trues / preds` 三路数据全部通过 `inverse_transform` 转回原始物理尺度后存入 JSON，彻底消除量纲错位；Dashboard 直接绘制，无需前端归一化处理 |
-| **彻底解决缓存脏读（v2.9 新增）** | `subprocess.wait()` 后加 `time.sleep(1)` 等待文件系统落盘，再 `st.cache_data.clear()` + `st.rerun()` |
-| **UnboundLocalError 修复（v2.9 新增）** | 预测阶段初始化兜底变量 `X_test_mean=np.zeros / X_test_std=np.ones`，避免 `use_revin=False` 分支下变量未定义；删除 `del X_train_mean/X_train_std` 条件分支 |
-| **波形量纲对齐（v2.8 新增）** | preview `trues` 改用归一化值，与 `history` / `preds` 量纲统一 |
-| **特征维度选择器（v2.7 新增）** | 动态下拉框，支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
-| **HTML flex 单行指标（v2.7 新增）** | `display: flex` 替代 `st.columns()`，跨屏幕绝对单行 |
-| **Plotly zeroline（v2.7 新增）** | 所有图表 Y 轴 `zeroline=True, zerolinecolor='lightgray'` |
-| **RevIN 数值安全（v2.7 新增）** | `std < 1e-5` 时强制置 1.0，避免常量序列/方差极小数据除零放大 |
-| **RevIN（可逆实例归一化）** | `--revin` 开关：训练 `(X-mean)/std`，推理 `Y_pred*std+mean`，SOTA 指标量级 |
+| **Dual-Dimension RevIN（v3.0 新增）** | `--revin_type` 支持 `none` / `temporal` / `feature` / `dual` 四种模式；`temporal` 对齐时间维度，`feature` 对齐特征维度，`dual` 先 feature 再 temporal；所有路径含 std < 1e-5 数值安全防御 |
+| **目录规范（v3.0 新增）** | 每个实验存入独立文件夹 `results/{exp_id}/`，内含 `params.json`、`metrics.json`、`preds.npy`、`trues.npy`、`X_test.npy`、`visualization.png` |
+| **静态可视化（v3.0 新增）** | 实验结束时自动调用 `plot_comparison_samples` 生成四段线对比 PNG（Historical Lookback / Hist.Pred / Test Input / Pred vs True）；`plot_summary_bar` 生成指标柱状图 |
+| **Summary CSV（v3.0 新增）** | `ExperimentRunner` 结束后生成 `results/summary_metrics.csv`，含所有实验的 MAE/MSE/RMSE/MAPE/RSE/CORR 参数与耗时 |
+| **实验日志持久化（v3.0 新增）** | `scripts/run_experiments.sh` 使用 `tee` 将每条实验 stdout + stderr 同步写入 `results/logs/{exp_id}.log` |
+| **Dashboard 保留** | Streamlit Dashboard 仍可通过 `--dashboard` 启动，用于交互式探查 |
+| **RevIN 数值安全（v2.9）** | `std < 1e-5` 时强制置 1.0，避免常量序列除零放大灾难 |
+| **全物理尺度落盘（v2.9）** | history / trues / preds 三路 JSON 数据全部 inverse_transform 为原始物理尺度 |
 
 ## 使用方法
 
@@ -40,21 +37,24 @@ python run.py --model all --seq_len 96 192 --pred_len 24 48 96
 # 并行 + 仪表盘（自动内存保护，内存 > 85% 时回退串行）
 python run.py --model all --parallel --dashboard
 
-# GPU 加速（需安装 CUDA 版 PyTorch；PatternSearch 用 torch.cdist+topk，LSH 批量投影）
-python run.py --model PatternSearch --use_gpu --dashboard
-
-# 仅启动仪表盘
-python run.py --skip_run --dashboard
-
-# RevIN（可逆实例归一化）— 深度学习 SOTA 预处理方式
-python run.py --model PatternSearch --revin --seq_len 96 --pred_len 96
-python run.py --model all --revin --dashboard
+# RevIN（Dual-Dimension 可逆实例归一化）— v3.0 新增
+# revin_type: none=无归一化, temporal=时间维度, feature=特征维度, dual=先 feature 再 temporal
+python run.py --model PatternSearch --revin_type temporal --seq_len 96 --pred_len 48
+python run.py --model all --revin_type dual --seq_len 96 --pred_len 48
+python run.py --model all --revin_type feature --dashboard
 
 # 常用 seq_len / pred_len（TSLib 标准配置）
 python run.py --model all --seq_len 96 --pred_len 96
 python run.py --model all --seq_len 192 --pred_len 192
 python run.py --model all --seq_len 336 --pred_len 96
 python run.py --model all --seq_len 720 --pred_len 96
+
+# 参数扫描（Shell 脚本 + tee 日志持久化）
+bash scripts/run_experiments.sh
+bash scripts/run_experiments.sh --models PatternSearch,LSHSearch --revin-types dual,temporal --seq-lens 96,192 --pred-lens 48,96
+
+# 仅启动仪表盘
+python run.py --skip_run --dashboard
 ```
 
 ### 参数说明
@@ -65,14 +65,18 @@ python run.py --model all --seq_len 720 --pred_len 96
 | `--seq_len` | 96 | 输入序列长度（TSLib 标准：96, 192, 336, 720） |
 | `--pred_len` | 48 | 预测序列长度（TSLib 标准：96, 192, 336, 720） |
 | `--features` | M | M=多变量, S=单变量 |
-| `--revin` | False | **启用 RevIN（可逆实例归一化）**：训练/推理执行 `(X-mean)/std` 归一化，预测后 `Y_pred*std+mean` 反归一化 |
+| `--revin_type` | none | **v3.0 新增**：归一化类型 `none` / `temporal` / `feature` / `dual` |
 | `--parallel` | False | 启用并行计算（内存保护自动降级） |
 | `--n_workers` | 4 | 并行 worker 数（最大 4） |
 | `--use_gpu` | False | `torch.cuda` 可用时，推理使用 GPU |
-| `--dashboard` | False | 运行后启动可视化 |
+| `--dashboard` | False | 运行后启动 Streamlit Dashboard |
 | `--skip_run` | False | 仅启动仪表盘，跳过实验 |
 
-> **RevIN vs 标准训练**：关闭 `--revin` 时模型在原始物理尺度上训练；开启 `--revin` 时在标准化空间训练，预测后反归一化。RevIN 模式下的指标量级与 DLinear / NLinear 等深度学习基线对齐。
+> **RevIN Type 说明**：
+> - `none`：无归一化，原始物理尺度训练
+> - `temporal`：Instance Norm，对每个样本沿 axis=1（时间维度）归一化
+> - `feature`：Channel Norm，对每个样本沿 axis=-1（特征维度）归一化，对齐多变量量级
+> - `dual`：先 feature 再 temporal，预测后先反 temporal 再反 feature，量级最稳定
 
 ### 模型特定参数
 
@@ -87,56 +91,148 @@ python run.py --model LSHSearch --n_hash_funcs 16 --n_tables 4 --candidate_cap_t
 python run.py --model SAXSearch --word_size 8 --alphabet_size 8 --bucket_top_k 8
 ```
 
+## 输出结构
+
+```
+results/
+├── summary_metrics.csv          # v3.0 新增：所有实验汇总（MAE/MSE/RMSE/MAPE/RSE/CORR）
+├── experiment_log.json          # 完整 JSON 日志
+├── logs/                        # v3.0 新增：每实验独立日志
+│   ├── {exp_id}_seq96_pred48_Rd.log
+│   └── ...
+└── {exp_id}/                    # v3.0 新增：每实验独立文件夹
+    ├── params.json              # 完整配置快照
+    ├── metrics.json            # MAE/MSE/RMSE/MAPE/RSE/CORR
+    ├── preds.npy                # 预测值（原始物理尺度）
+    ├── trues.npy                # 真实值（原始物理尺度）
+    ├── X_test.npy               # 测试集输入
+    └── visualization.png         # v3.0 新增：四段线对比图
+```
+
+## 静态可视化（plotting.py）
+
+实验结束时自动调用 `plot_comparison_samples` 生成 `visualization.png`，也可独立使用：
+
+```python
+from plotting import plot_comparison_samples, plot_summary_bar
+
+# 生成四段线对比网格图
+plot_comparison_samples(
+    history=np.load('results/{exp_id}/X_test.npy'),
+    preds=np.load('results/{exp_id}/preds.npy'),
+    trues=np.load('results/{exp_id}/trues.npy'),
+    seq_len=96, pred_len=48, n_features=7,
+    model_name='PatternSearch',
+    params={'revin_type': 'dual', 'top_k': 5},
+    save_path='results/{exp_id}/visualization.png',
+    n_samples=9,
+    feat_idx=-1   # -1 = Target (OT) 列
+)
+
+# 从 summary_metrics.csv 生成指标柱状图
+plot_summary_bar('results/summary_metrics.csv', metric='MAE',
+                save_path='results/summary_MAE_bar.png')
+```
+
+### 四段线说明
+
+| 区域 | 颜色 | 说明 |
+|------|------|------|
+| A: Hist. Lookback | 蓝灰 | 模型检索到的最相似历史子序列 |
+| B: Hist. Prediction | 橙黄 | 历史匹配段对应的真实后续 |
+| C: Test Input | 深蓝 | 当前测试样本的输入序列 |
+| D: True (Future) | 绿色 | 测试集真实未来值 |
+| D: Prediction | 红色虚线 | 模型预测值 |
+
+X 轴统一为时间偏移（0 = 预测起点），Y 轴为原始物理尺度。
+
+## 参数扫描（scripts/run_experiments.sh）
+
+```bash
+# 默认：3 模型 × 2 seq × 2 pred × 4 revin × 3 top_k = 144 组合
+bash scripts/run_experiments.sh
+
+# 自定义参数
+bash scripts/run_experiments.sh \
+    --models PatternSearch,LSHSearch \
+    --revin-types dual,temporal \
+    --seq-lens 96,192,336 \
+    --pred-lens 48,96 \
+    --top-k 5,10 \
+    --parallel
+
+# 仅预览命令不执行
+bash scripts/run_experiments.sh --dry-run
+```
+
+脚本会自动：
+1. 生成 `results/logs/{exp_id}.log`（tee 持久化）
+2. 实验结束后汇总 `summary_metrics.csv`
+3. 打印 MAE 排名并生成柱状图
+
 ## 项目结构
 
 ```
 .
-├── run.py                 # 统一入口（含 RevIN 预处理、内存保护调度器、TSLib Y截断）
+├── run.py                      # 统一入口（Dual-Dimension RevIN、目录规范、实验日志持久化）
+├── plotting.py                 # v3.0 新增：四段线静态可视化 + Summary 柱状图
 ├── models/
-│   ├── PatternSearch.py   # KD-Tree KNN（float32 + torch.cdist + gc）
-│   ├── LSHSearch.py       # 局部敏感哈希（uint64 打包 + 两阶段重排 + Shape广播修复）
-│   └── SAXSearch.py        # 符号聚合近似（NearestNeighbors 模糊匹配 + Shape广播修复）
+│   ├── PatternSearch.py        # KD-Tree KNN（float32 + torch.cdist + gc）
+│   ├── LSHSearch.py            # 局部敏感哈希（uint64 打包 + 两阶段重排）
+│   └── SAXSearch.py            # 符号聚合近似（NearestNeighbors 模糊匹配）
 ├── data_provider/
-│   └── data_loader.py     # 数据加载（TSLib 固定边界 + float32 + 4值返回）
+│   └── data_loader.py          # 数据加载（TSLib 固定边界 + float32）
 ├── dashboard/
-│   └── app.py             # Streamlit 可视化（RevIN开关、Target列绘图、expander表单、实时Log+自动刷新）
-├── utils/
-│   └── metrics.py         # 评估指标（MAE/MSE/RMSE/MAPE/CORR/RSE，全 float() 包裹）
-└── results/              # 实验输出
-    ├── experiment_log.json     # 日志（metrics + preview['preds/trues/history']）
-    ├── *_preds.npy            # 完整预测结果（float32）
-    └── *_trues.npy            # 完整真实值（float32）
+│   └── app.py                  # Streamlit 可视化（全物理尺度、特征选择、HTML flex 指标）
+├── scripts/
+│   └── run_experiments.sh      # v3.0 新增：参数扫描 + tee 日志 + tqdm 进度
+└── results/                    # 实验输出（v3.0 独立文件夹规范）
+    ├── summary_metrics.csv     # v3.0：所有实验汇总 CSV
+    ├── experiment_log.json    # 完整 JSON 日志
+    ├── logs/                  # v3.0：每实验 {exp_id}.log
+    └── {exp_id}/
+        ├── params.json         # v3.0：配置快照
+        ├── metrics.json        # MAE/MSE/RMSE/MAPE/RSE/CORR
+        ├── preds.npy           # 预测值（原始物理尺度）
+        ├── trues.npy           # 真实值（原始物理尺度）
+        ├── X_test.npy          # 测试集输入
+        └── visualization.png    # v3.0：四段线对比网格图
 ```
 
-## RevIN（可逆实例归一化）
+## Dual-Dimension RevIN（v3.0）
 
-RevIN 是 DLinear / NLinear 等 SOTA 深度学习模型的标配预处理，通过实例级归一化消除序列内均值/方差偏移。
+Dual-Dimension RevIN 在 `run_single_experiment` 内部实现，对输入 X 和目标 Y 均适用：
 
-### 公式
+### 四种模式
 
+| 模式 | 公式 | 适用场景 |
+|------|------|---------|
+| `none` | 无归一化 | 物理尺度直接训练 |
+| `temporal` | \(X' = (X - \mu_{axis=1}) / \sigma_{axis=1}\) | 消除序列内均值偏移（TSLib SOTA 基线） |
+| `feature` | \(X' = (X - \mu_{axis=-1}) / \sigma_{axis=-1}\) | 对齐多变量不同特征量级 |
+| `dual` | 先 feature 再 temporal | 量级差异大且趋势明显的复杂数据 |
+
+### 数值安全
+
+所有四种模式的 std 计算均含防御机制：
+
+```python
+def _safe_std(std, threshold=1e-5):
+    return np.where(std < threshold, 1.0, std)  # 防止除零放大
 ```
-训练阶段（--revin）：
-  X_mean = mean(X, axis=1, keepdims=True)
-  X_std  = sqrt(var(X, axis=1)) + 1e-8
-  X_norm = (X - X_mean) / X_std        ← 归一化输入
-  Y_norm = (Y - X_mean) / X_std        ← Y 也用 X 的统计量归一化
-  model.fit(X_norm, Y_norm)
 
-推理阶段：
-  X_test_norm = (X_test - X_test_mean) / X_test_std
-  Y_pred_norm = model.predict(X_test_norm)
-  Y_pred = Y_pred_norm * X_test_std + X_test_mean   ← 反归一化
-```
+### 指标计算
+
+指标（MAE/MSE/RMSE/MAPE/RSE/CORR）始终在**归一化空间**计算，与 TSLib 0.3 学术基线量级对齐。
 
 ### 为什么用 RevIN
 
-| 维度 | 无归一化 | Mean-Shift | RevIN（完整） |
-|------|---------|------------|--------------|
-| 均值对齐 | ❌ | ✅ | ✅ |
-| 方差对齐 | ❌ | ❌ | ✅ |
-| TSLib 指标量级 | ❌ | 部分对齐 | ✅ |
-| 深度学习 SOTA 对齐 | ❌ | ❌ | ✅ |
-| 计算开销 | 无 | 极低 | 极低 |
+| 维度 | 无归一化 | Mean-Shift | RevIN temporal | RevIN dual |
+|------|---------|------------|-----------------|-------------|
+| 均值对齐 | ❌ | ✅ | ✅ | ✅ |
+| 方差对齐 | ❌ | ❌ | ✅ | ✅ |
+| 特征量级对齐 | ❌ | ❌ | ❌ | ✅ |
+| TSLib SOTA 量级 | ❌ | 部分 | ✅ | ✅ |
 
 ## 算法对比
 
@@ -217,43 +313,69 @@ python run.py --skip_run --dashboard
 | **特征维度选择器** | 动态下拉框，支持 ETT 预定义名称（HUFL/HULL/MUFL/.../OT）；末列标注 (Target) |
 | **HTML flex 单行指标** | `display: flex` 替代 `st.columns()`，跨屏幕绝对单行 |
 | **Plotly zeroline** | 所有图表 Y 轴 `zeroline=True, zerolinecolor='lightgray'` |
-| **RevIN 开关** | 表单中勾选"启用 RevIN"，自动透传 `--revin` 参数 |
-| **指标直接读取** | 直接从 JSON metrics 读取，绝不重新计算 |
-| **实时 Log** | `subprocess.Popen` + `iter(stdout.readline)` 实时打屏，不阻塞 UI |
-| **expander 表单** | 侧边栏表单折叠 `expanded=False`，节省主视图空间 |
 
-## 输出
+> **推荐**：v3.0 优先使用静态 `visualization.png` 和 `summary_metrics.csv` 进行分析，Dashboard 用于交互式深度探查。
 
-- `results/experiment_log.json` - 实验日志（metrics + preview['preds/trues/history']）
-- `results/*_preds.npy` - 完整预测结果（float32）
-- `results/*_trues.npy` - 完整真实值（float32）
-- `results/*_X_test.npy` - 测试集输入（用于 Dashboard 连贯波形）
+## 输出（v3.0 目录规范）
 
-运行 `--dashboard` 后访问 `http://localhost:8501` 查看可视化。
+每个实验自动生成独立文件夹 `results/{exp_id}/`：
+
+| 文件 | 说明 |
+|------|------|
+| `params.json` | 完整配置快照（v3.0 新增） |
+| `metrics.json` | MAE/MSE/RMSE/MAPE/RSE/CORR（v3.0 新增） |
+| `preds.npy` | 预测值（原始物理尺度，float32） |
+| `trues.npy` | 真实值（原始物理尺度，float32） |
+| `X_test.npy` | 测试集输入（用于 Dashboard 连贯波形） |
+| `visualization.png` | 四段线对比网格图（v3.0 新增） |
+
+汇总文件：
+- `results/summary_metrics.csv` — 所有实验的指标汇总
+- `results/experiment_log.json` — 完整 JSON 日志
+- `results/logs/{exp_id}.log` — 每实验独立日志
+
+运行 `--dashboard` 后访问 `http://localhost:8501` 查看可视化（Streamlit Dashboard）。
 
 ## 核心模块复用
 
 ```python
 from run import run_single_experiment, ExperimentRunner
 
-# 单独运行一个实验（支持 --revin）
+# 单独运行一个实验（v3.0 revin_type 参数）
 result = run_single_experiment({
     'model_name': 'PatternSearch',
     'seq_len': 96,
     'pred_len': 48,
     'top_k': 5,
-    'mean_shift': True,  # 兼容旧 key；新版建议用 'mean_shift': True 等效 --revin
+    'revin_type': 'temporal',   # none / temporal / feature / dual
 })
 
-# RevIN 模式
+# Dual RevIN 模式
 result = run_single_experiment({
-    'model_name': 'PatternSearch',
+    'model_name': 'SAXSearch',
     'seq_len': 96,
     'pred_len': 96,
-    'mean_shift': True,   # v2.6 中此 key 即 --revin
+    'word_size': 8,
+    'alphabet_size': 8,
+    'revin_type': 'dual',
 })
+# 返回值含 exp_id / exp_dir / metrics / preview
 
-# 批量运行
+# 批量运行（自动生成 summary_metrics.csv）
 runner = ExperimentRunner(args)
 runner.run()
+
+# 静态绘图（独立使用）
+from plotting import plot_comparison_samples, plot_summary_bar
+plot_comparison_samples(
+    history=np.load('results/{exp_id}/X_test.npy'),
+    preds=np.load('results/{exp_id}/preds.npy'),
+    trues=np.load('results/{exp_id}/trues.npy'),
+    seq_len=96, pred_len=48, n_features=7,
+    model_name='PatternSearch',
+    params={'revin_type': 'dual', 'top_k': 5},
+    save_path='results/{exp_id}/visualization.png',
+    n_samples=9, feat_idx=-1
+)
+plot_summary_bar('results/summary_metrics.csv', metric='MAE')
 ```

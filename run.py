@@ -1,17 +1,19 @@
 """
 统一入口脚本 - 时序预测基线模型系统
 
-Bug 修复 (v2.1):
-- 移除 Y_pred[:, :, 0] / Y_test[:, :, 0] 破坏性切片，解决多变量 broadcast 错误
-- 引入 logging 模块（INFO级别 + 时间戳）
-- 异常隔离：单个模型失败不影响后续实验
-- Dashboard：无论实验结果如何，只要带 --dashboard 必定启动
-- skip_run + dashboard：直接启动仪表盘后 exit(0)
+v3.0 核心变更：
+1. Dual-Dimension RevIN：revin_type 支持 none / temporal / feature / dual
+   - temporal:  (X - mean(X,axis=1)) / (std(X,axis=1) + eps)   — _instance_ 归一化
+   - feature:  (X - mean(X,axis=-1)) / (std(X,axis=-1) + eps) — _channel_ 归一化
+   - dual:     先 feature 再 temporal，预测后 inverse_dual 反归一化
+   - 数值安全：std < 1e-5 时强制置 1.0
+2. 目录规范：每个实验独立文件夹 results/{exp_id}/
+3. 自动绘图：实验结束时调用 plot_comparison_samples 生成 PNG
+4. Summary CSV：ExperimentRunner 结束时汇总所有实验指标到 summary_metrics.csv
 
 Usage:
-    python run.py --model all --dashboard              # 所有模型 + 仪表盘
-    python run.py --model PatternSearch --dashboard    # 单模型 + 仪表盘
-    python run.py --dashboard --skip_run               # 仅启动仪表盘
+    python run.py --model all --seq_len 96 --pred_len 48 --revin_type dual
+    python run.py --model PatternSearch --revin_type temporal --top_k 5
 """
 
 import os
@@ -23,12 +25,34 @@ import logging
 import psutil
 import argparse
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # ============================================================
-# 全局日志配置（带时间戳）
+# 全局日志配置（带时间戳 + FileHandler 持久化）
 # ============================================================
+
+def _setup_logger(exp_id: Optional[str] = None) -> logging.Logger:
+    """为每个实验配置独立日志器（写入 results/logs/{exp_id}.log）"""
+    log_dir = os.path.join(RESULTS_DIR, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    log = logging.getLogger(__name__ + ('_' + exp_id if exp_id else ''))
+    log.setLevel(logging.INFO)
+    log.handlers.clear()
+
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    log.addHandler(sh)
+
+    if exp_id:
+        fh = logging.FileHandler(os.path.join(log_dir, exp_id + '.log'), encoding='utf-8')
+        fh.setFormatter(fmt)
+        log.addHandler(fh)
+
+    return log
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +69,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(os.path.join(RESULTS_DIR, 'logs'), exist_ok=True)
 
 # ============================================================
 # 模型注册表
@@ -82,17 +107,120 @@ def import_models():
 # 核心计算逻辑（可独立复用）
 # ============================================================
 
+# ============================================================
+# Dual-Dimension RevIN 工具函数
+# ============================================================
+
+def _safe_std(std: np.ndarray, threshold: float = 1e-5) -> np.ndarray:
+    """数值安全：将 std < threshold 的位置强制置 1.0，防止除零放大"""
+    return np.where(std < threshold, 1.0, std)
+
+
+def apply_revin(
+    X: np.ndarray,
+    revin_type: str,
+    prefix: str = 'X'
+) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """
+    Dual-Dimension RevIN 归一化
+
+    Args:
+        X: shape (n, seq_len, n_feat) 的 float32 数组
+        revin_type: 'none' | 'temporal' | 'feature' | 'dual'
+        prefix: 日志前缀
+
+    Returns:
+        X_norm: 归一化后的数组
+        revin_stats: 字典，key 含 'mean/feat', 'std/feat', 'mean/temp', 'std/temp'
+    """
+    n, seq, n_feat = X.shape
+    stats = {}
+    X_out = X.astype(np.float32)
+
+    if revin_type == 'none':
+        return X_out, stats
+
+    elif revin_type == 'temporal':
+        # 维度 A：沿 axis=1（时间维度）归一化
+        mean = np.mean(X, axis=1, keepdims=True)
+        std = _safe_std(np.std(X, axis=1, keepdims=True))
+        X_out = ((X - mean) / std).astype(np.float32)
+        stats = {'mean_t': mean, 'std_t': std}
+        logger.info(f"[RevIN-{prefix}] temporal: mean={mean.shape}, std={std.shape}")
+
+    elif revin_type == 'feature':
+        # 维度 B：沿 axis=-1（特征维度）归一化
+        mean = np.mean(X, axis=-1, keepdims=True)
+        std = _safe_std(np.std(X, axis=-1, keepdims=True))
+        X_out = ((X - mean) / std).astype(np.float32)
+        stats = {'mean_f': mean, 'std_f': std}
+        logger.info(f"[RevIN-{prefix}] feature: mean={mean.shape}, std={std.shape}")
+
+    elif revin_type == 'dual':
+        # 维度 B 先：feature-wise（对齐不同特征的量级）
+        mean_f = np.mean(X, axis=-1, keepdims=True)
+        std_f = _safe_std(np.std(X, axis=-1, keepdims=True))
+        X_f = ((X - mean_f) / std_f).astype(np.float32)
+        # 维度 A 再：temporal-wise（消除时间趋势）
+        mean_t = np.mean(X_f, axis=1, keepdims=True)
+        std_t = _safe_std(np.std(X_f, axis=1, keepdims=True))
+        X_out = ((X_f - mean_t) / std_t).astype(np.float32)
+        stats = {'mean_f': mean_f, 'std_f': std_f, 'mean_t': mean_t, 'std_t': std_t}
+        logger.info(f"[RevIN-{prefix}] dual: feature {mean_f.shape} -> temporal {mean_t.shape}")
+
+    else:
+        logger.warning(f"[RevIN-{prefix}] 未知 revin_type='{revin_type}'，跳过归一化")
+
+    return X_out, stats
+
+
+def inverse_revin(
+    Y_norm: np.ndarray,
+    revin_stats: Dict[str, np.ndarray],
+    revin_type: str
+) -> np.ndarray:
+    """
+    Dual-Dimension RevIN 反归一化（仅 RevIN 路径调用）
+    """
+    if revin_type == 'none':
+        return Y_norm.astype(np.float32)
+
+    elif revin_type == 'temporal':
+        mean_t = revin_stats['mean_t']
+        std_t = revin_stats['std_t']
+        return (Y_norm * std_t + mean_t).astype(np.float32)
+
+    elif revin_type == 'feature':
+        mean_f = revin_stats['mean_f']
+        std_f = revin_stats['std_f']
+        return (Y_norm * std_f + mean_f).astype(np.float32)
+
+    elif revin_type == 'dual':
+        mean_t = revin_stats['mean_t']
+        std_t = revin_stats['std_t']
+        mean_f = revin_stats['mean_f']
+        std_f = revin_stats['std_f']
+        # 先反 temporal，再反 feature（与 forward 顺序相反）
+        Y_t = Y_norm * std_t + mean_t
+        return (Y_t * std_f + mean_f).astype(np.float32)
+
+    return Y_norm.astype(np.float32)
+
+
+# ============================================================
+# 核心计算逻辑（可独立复用）
+# ============================================================
+
 def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     运行单次实验
 
-    v2.7 核心变更：
-    1. RevIN 数值安全：std < 1e-5 时强制置 1.0，避免常量序列/方差极小数据
-       产生除零放大灾难（SAXSearch/LSHSearch MAE 几千的问题）
-    2. TSLib Y 截断：强制 Y_train/Y_test = Y[:, -pred_len:, :]
-    3. RevIN 开关（--revin）：训练 (X-mean)/std，推理 Y_pred*std+mean
-    4. 指标计算时机：始终在归一化空间（inverse_transform 之前）
-    5. 历史数据落盘：JSON preview['history']，供 Dashboard 连贯波形使用
+    v3.0 核心变更：
+    1. Dual-Dimension RevIN：revin_type in {none, temporal, feature, dual}
+    2. 目录规范：每个实验结果存入 results/{exp_id}/
+    3. 数值安全：std < 1e-5 → 1.0
+    4. 指标在归一化空间计算（inverse_transform 之前）
+    5. 实验结束时自动调用绘图函数生成 PNG
     """
     import numpy as np
     from data_provider.data_loader import get_data, get_X_Y_from_dataset
@@ -102,7 +230,19 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
     model_name = config['model_name']
     seq_len = config['seq_len']
     pred_len = config['pred_len']
-    use_revin = config.get('mean_shift', False)  # 兼容旧 key，优先读 revin
+    revin_type = config.get('revin_type', 'none')
+
+    # 生成 exp_id（必须先于所有文件操作）
+    exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
+    exp_dir = os.path.join(RESULTS_DIR, exp_id)
+    os.makedirs(exp_dir, exist_ok=True)
+
+    # 实验级日志器（写入 results/logs/{exp_id}.log）
+    log = _setup_logger(exp_id)
+    log.info("=" * 60)
+    log.info(f"实验 {exp_id} 启动")
+    log.info(f"RevIN 类型: {revin_type}")
+    log.info("=" * 60)
 
     try:
         import_models()
@@ -116,9 +256,9 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         use_gpu = bool(config.get('use_gpu', False))
         device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         if use_gpu and device == 'cpu':
-            logger.warning(f"[{model_name}] 请求 GPU 但 torch.cuda 不可用，已回退 CPU")
+            log.warning(f"[{model_name}] 请求 GPU 但不可用，回退 CPU")
         model_params['device'] = device
-        logger.info(f"[{model_name}] 计算设备: {device}, revin={use_revin}")
+        log.info(f"[{model_name}] device={device}, revin_type={revin_type}")
 
         class Args:
             pass
@@ -130,16 +270,15 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         args.features = config.get('features', 'M')
         args.target = config.get('target', 'OT')
 
-        logger.info(f"[{model_name}] 加载数据 seq={seq_len} pred={pred_len}")
+        log.info(f"[{model_name}] 加载数据 seq={seq_len} pred={pred_len}")
         train_set, val_set, test_set = get_data(args)
         X_train, Y_train = get_X_Y_from_dataset(train_set)
         X_test, Y_test = get_X_Y_from_dataset(test_set)
 
-        logger.info(f"[{model_name}] 原始数据: X_train={X_train.shape}, Y_train={Y_train.shape}, "
-                    f"X_test={X_test.shape}, Y_test={Y_test.shape}")
+        log.info(f"[{model_name}] 原始: X_train={X_train.shape}, Y_train={Y_train.shape}, "
+                 f"X_test={X_test.shape}, Y_test={Y_test.shape}")
 
         # ── TSLib Y 截断 ──────────────────────────────────────────
-        # TSLib Dataloader 返回 Y = label_len + pred_len，强制取最后 pred_len
         if Y_train.ndim == 3:
             Y_train = Y_train[:, -pred_len:, :]
         elif Y_train.ndim == 2:
@@ -150,132 +289,159 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         elif Y_test.ndim == 2:
             Y_test = Y_test[:, -pred_len:]
 
-        logger.info(f"[{model_name}] Y 截断后: Y_train={Y_train.shape}, Y_test={Y_test.shape}")
+        log.info(f"[{model_name}] Y 截断后: Y_train={Y_train.shape}, Y_test={Y_test.shape}")
 
-        # ── 3D 化（统一为 (n, seq/pred, n_feat)，便于广播）─────────
+        # ── 3D 化：统一为 (n, seq/pred, n_feat) ─────────────────
         X_train_3d = X_train.reshape(X_train.shape[0], seq_len, -1) \
             if X_train.ndim == 2 else X_train.astype(np.float32)
         Y_train_3d = Y_train.reshape(Y_train.shape[0], pred_len, -1) \
             if Y_train.ndim == 2 else Y_train.astype(np.float32)
 
-        # ── 保存截断前 100 条 X_test 原始值（Dashboard 连贯波形用）───
-        # 关键：必须在 3D 化之前保存原始值，后续统一反归一化
-        exp_id = _make_exp_id(model_name, seq_len, pred_len, config)
+        n_feat = X_train_3d.shape[-1]
         MAX_PREVIEW = 100
-        history_preview_raw = X_test[:MAX_PREVIEW].copy()
 
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_X_test.npy"),
-                X_test.astype(np.float32))
+        # ── 保存前 100 条 X_test 原始值（用于波形可视化）──────────
+        history_preview_raw = X_test[:MAX_PREVIEW].copy()
+        log.info(f"[{model_name}] 保存 {MAX_PREVIEW} 条历史预览")
 
         del train_set, val_set
         gc.collect()
 
-        # ── RevIN（数值安全版 Instance Normalization）────────────────
-        # 关键防御：如果 std < 1e-5（常量序列/方差极小），强制置为 1.0，
-        # 避免除零放大导致的灾难性数值爆炸（SAXSearch / LSHSearch MAE 几千的问题）
-        if use_revin:
-            X_train_mean = np.mean(X_train_3d, axis=1, keepdims=True)
-            X_train_std = np.std(X_train_3d, axis=1, keepdims=True)
-            # 防御：std < 1e-5 时强制置 1.0（此时序列方差极小，不做缩放）
-            X_train_std = np.where(X_train_std < 1e-5, 1.0, X_train_std)
-            X_train_norm = ((X_train_3d - X_train_mean) / X_train_std).astype(np.float32)
-            Y_train_norm = ((Y_train_3d - X_train_mean) / X_train_std).astype(np.float32)
-            logger.info(f"[{model_name}] RevIN 训练: mean={X_train_mean.shape}, std={X_train_std.shape}")
-        else:
-            X_train_norm = X_train_3d.astype(np.float32)
-            Y_train_norm = Y_train_3d.astype(np.float32)
-            logger.info(f"[{model_name}] 标准训练（无 RevIN）")
+        # ── Dual-Dimension RevIN 训练阶段 ─────────────────────────
+        X_train_norm, revin_stats_train = apply_revin(
+            X_train_3d, revin_type, prefix=model_name + '_train'
+        )
+        Y_train_norm, _ = apply_revin(
+            Y_train_3d, revin_type, prefix=model_name + '_train_Y'
+        )
+        log.info(f"[{model_name}] 训练数据归一化完成")
 
         del X_train, Y_train
         gc.collect()
 
-        logger.info(f"[{model_name}] 训练中...")
+        # ── 模型训练 ─────────────────────────────────────────────
+        log.info(f"[{model_name}] 训练中...")
         model = ModelClass(**model_params)
         model.fit(X_train_norm, Y_train_norm)
 
         del X_train_3d, Y_train_3d, X_train_norm, Y_train_norm
         gc.collect()
 
-        # ── 预测阶段 ───────────────────────────────────────────────
+        # ── 推理阶段 ──────────────────────────────────────────────
         X_test_3d = X_test.reshape(X_test.shape[0], seq_len, -1) \
             if X_test.ndim == 2 else X_test.astype(np.float32)
         Y_test_3d = Y_test.reshape(Y_test.shape[0], pred_len, -1) \
             if Y_test.ndim == 2 else Y_test.astype(np.float32)
 
-        # ── 兜底初始化（防止 UnboundLocalError）────────────────────
-        # 如果 use_revin=False，后续 preview 反归一化时这些变量仍然被引用，
-        # 必须存在且形状正确才能通过 inverse_transform 的 reshape 验证
-        n_test_samples = X_test_3d.shape[0]
-        n_feat = X_test_3d.shape[-1]
-        X_test_mean = np.zeros((n_test_samples, 1, n_feat), dtype=np.float32)
-        X_test_std = np.ones((n_test_samples, 1, n_feat), dtype=np.float32)
-
-        if use_revin:
-            X_test_mean = np.mean(X_test_3d, axis=1, keepdims=True)
-            X_test_std = np.std(X_test_3d, axis=1, keepdims=True)
-            # 防御：std < 1e-5 时强制置 1.0（避免除零放大）
-            X_test_std = np.where(X_test_std < 1e-5, 1.0, X_test_std)
-            X_test_norm = ((X_test_3d - X_test_mean) / X_test_std).astype(np.float32)
-            logger.info(f"[{model_name}] RevIN 推理...")
-        else:
-            X_test_norm = X_test_3d.astype(np.float32)
-            logger.info(f"[{model_name}] 标准推理（无 RevIN）")
+        X_test_norm, revin_stats_test = apply_revin(
+            X_test_3d, revin_type, prefix=model_name + '_test'
+        )
+        log.info(f"[{model_name}] 推理归一化完成")
 
         del X_test
         gc.collect()
 
-        logger.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本...")
+        log.info(f"[{model_name}] 预测 {X_test_3d.shape[0]} 样本...")
         Y_pred_norm = model.predict(X_test_norm)
 
         del model, X_test_norm
         gc.collect()
 
-        # RevIN 反归一化：Y_pred = Y_pred_norm * std + mean
-        if use_revin:
-            Y_pred = (Y_pred_norm * X_test_std + X_test_mean).astype(np.float32)
-            del Y_pred_norm
-        else:
-            Y_pred = Y_pred_norm.astype(np.float32)
-            del Y_pred_norm
-        gc.collect()
-
-        # ── 指标在归一化空间计算（对齐 TSLib 0.3 量级）─────────────
-        metrics = calculate_all_metrics(Y_pred, Y_test_3d)
+        # ── 指标计算（在归一化空间，与 TSLib 0.3 量级对齐）────────
+        metrics = calculate_all_metrics(Y_pred_norm, Y_test_3d)
 
         elapsed = time.time() - start_time
-        logger.info(f"[{model_name}] 归一化空间 MAE={metrics.get('MAE', 0):.4f} "
-                    f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
+        log.info(f"[{model_name}] 归一化空间 MAE={metrics.get('MAE', 0):.4f} "
+                 f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
 
-        # ── inverse_transform（全物理尺度落盘 + JSON preview）──────
-        # 统一将归一化值转回原始物理尺度后落盘 JSON / .npy
-        # 关键：test_set 必须在 preview 全部处理完毕后再 del
-        n_test, p_len, n_feat = Y_pred.shape
+        # ── 反归一化（得到原始物理尺度）──────────────────────────
+        Y_pred = inverse_revin(Y_pred_norm, revin_stats_test, revin_type)
+        del Y_pred_norm
+        gc.collect()
+
+        # ── inverse_transform + 保存 .npy ─────────────────────────────
+        n_test, p_len, _ = Y_pred.shape
         Y_pred_flat = Y_pred.reshape(-1, n_feat)
         Y_test_flat = Y_test_3d.reshape(-1, n_feat)
 
-        Y_pred_orig = test_set.inverse_transform(Y_pred_flat)
-        Y_test_orig = test_set.inverse_transform(Y_test_flat)
+        Y_pred_inv = test_set.inverse_transform(Y_pred_flat)
+        Y_test_inv = test_set.inverse_transform(Y_test_flat)
 
-        Y_pred_orig = Y_pred_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
-        Y_test_orig = Y_test_orig.reshape(n_test, p_len, n_feat).astype(np.float32)
+        Y_pred_inv = Y_pred_inv.reshape(n_test, p_len, n_feat).astype(np.float32)
+        Y_test_inv = Y_test_inv.reshape(n_test, p_len, n_feat).astype(np.float32)
 
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_preds.npy"), Y_pred_orig)
-        np.save(os.path.join(RESULTS_DIR, f"{exp_id}_trues.npy"), Y_test_orig)
-
-        # JSON preview：三路数据（history / trues / preds）全部统一反归一化
-        preview_hist = history_preview_raw.reshape(-1, n_feat)
-        preview_hist_orig = test_set.inverse_transform(preview_hist) \
-            .reshape(MAX_PREVIEW, seq_len * n_feat).tolist()
-        preview_pred = Y_pred_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-        preview_true = Y_test_orig[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        np.save(os.path.join(exp_dir, 'preds.npy'), Y_pred_inv)
+        np.save(os.path.join(exp_dir, 'trues.npy'), Y_test_inv)
+        np.save(os.path.join(exp_dir, 'X_test.npy'), history_preview_raw.reshape(MAX_PREVIEW, -1))
 
         del test_set, Y_pred_flat, Y_test_flat
         gc.collect()
 
-        del Y_pred_orig, Y_test_orig
+        # ── JSON preview（三路全部反归一化为原始尺度）─────────────
+        preview_hist_flat = history_preview_raw.reshape(-1, n_feat)
+        # 用 TSLib StandardScaler 反归一化 history（从原始数据尺度转回原始物理尺度）
+        # 注意：history_preview_raw 本身就是原始尺度，无需再次 inverse_transform
+        # 仅对展平格式做 reshape（与 preds/trues 保持一致的列表格式）
+        preview_hist_list = history_preview_raw.reshape(
+            MAX_PREVIEW, seq_len * n_feat
+        ).tolist()
+        preview_pred = Y_pred_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        preview_true = Y_test_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+
+        del Y_pred, Y_pred_inv, Y_test_inv
         gc.collect()
 
+        # ── 保存 params.json ────────────────────────────────────
+        params_out = {
+            'model_name': model_name,
+            'seq_len': seq_len,
+            'pred_len': pred_len,
+            'n_features': int(n_feat),
+            'revin_type': revin_type,
+            **{k: v for k, v in model_params.items() if k != 'device'},
+            'device': str(device),
+            'dataset': config.get('data_path', 'ETTm1.csv'),
+            'features': config.get('features', 'M'),
+            'target': config.get('target', 'OT'),
+        }
+        with open(os.path.join(exp_dir, 'params.json'), 'w', encoding='utf-8') as f:
+            json.dump(params_out, f, indent=2, ensure_ascii=False)
+
+        # ── 保存 metrics.json ────────────────────────────────────
+        metrics_clean = {}
+        for k, v in metrics.items():
+            try:
+                metrics_clean[k] = float(v) if (v == v) else 0.0
+            except Exception:
+                metrics_clean[k] = 0.0
+        with open(os.path.join(exp_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+            json.dump(metrics_clean, f, indent=2)
+
+        # ── 自动绘图（plot_comparison_samples）──────────────────
+        try:
+            from plotting import plot_comparison_samples
+            png_path = os.path.join(exp_dir, 'visualization.png')
+            plot_comparison_samples(
+                history=np.array(preview_hist_list),
+                preds=np.array(preview_pred),
+                trues=np.array(preview_true),
+                seq_len=seq_len,
+                pred_len=pred_len,
+                n_features=n_feat,
+                model_name=model_name,
+                params=params_out,
+                save_path=png_path,
+                n_samples=9,
+                figsize=(12, 10)
+            )
+            log.info(f"[{model_name}] 可视化已保存: {png_path}")
+        except Exception as plot_err:
+            log.warning(f"[{model_name}] 绘图失败（不影响实验）: {plot_err}")
+
+        log.info(f"[{model_name}] 实验完成 elapsed={elapsed:.1f}s")
         return {
+            'exp_id': exp_id,
+            'exp_dir': exp_dir,
             'config': config,
             'metrics': metrics,
             'status': 'success',
@@ -283,20 +449,23 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             'preview': {
                 'preds': preview_pred,
                 'trues': preview_true,
-                'history': preview_hist_orig,
+                'history': preview_hist_list,
                 'count': min(len(preview_pred), len(preview_true)),
             },
             'npy_file': {
-                'preds': f"{exp_id}_preds.npy",
-                'trues': f"{exp_id}_trues.npy",
-                'x_test': f"{exp_id}_X_test.npy",
+                'preds': os.path.join(exp_dir, 'preds.npy'),
+                'trues': os.path.join(exp_dir, 'trues.npy'),
+                'x_test': os.path.join(exp_dir, 'X_test.npy'),
             }
         }
+
     except Exception as e:
         import traceback
-        logger.error(f"[{model_name}] 失败: {e}")
-        logger.debug(traceback.format_exc())
+        log.error(f"[{model_name}] 失败: {e}")
+        log.debug(traceback.format_exc())
         return {
+            'exp_id': exp_id,
+            'exp_dir': exp_dir,
             'config': config,
             'metrics': {},
             'status': 'failed',
@@ -325,15 +494,22 @@ def _get_default(param: str) -> Any:
 
 
 def _make_exp_id(model_name: str, seq_len: int, pred_len: int, config: Dict) -> str:
-    """生成实验ID"""
+    """生成实验ID（含 revin_type 后缀避免同名冲突）"""
     dataset = config.get('data_path', 'ETTm1.csv').replace('.csv', '')
+    revin = config.get('revin_type', 'none')
+    revin_suffix = '_R' + revin[0].upper() if revin and revin != 'none' else ''
 
     if model_name == 'PatternSearch':
-        return f"{dataset}_seq{seq_len}_pred{pred_len}_k{config.get('top_k', 5)}"
+        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
+                + "_k" + str(config.get('top_k', 5)) + revin_suffix)
     elif model_name == 'LSHSearch':
-        return f"{dataset}_seq{seq_len}_pred{pred_len}_lsh_h{config.get('n_hash_funcs', 16)}_t{config.get('n_tables', 4)}"
+        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
+                + "_lsh_h" + str(config.get('n_hash_funcs', 16))
+                + "_t" + str(config.get('n_tables', 4)) + revin_suffix)
     else:
-        return f"{dataset}_seq{seq_len}_pred{pred_len}_sax_w{config.get('word_size', 8)}_a{config.get('alphabet_size', 8)}"
+        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
+                + "_sax_w" + str(config.get('word_size', 8))
+                + "_a" + str(config.get('alphabet_size', 8)) + revin_suffix)
 
 
 def _expand_configs(model_list: List[str], seq_lens: List[int], pred_lens: List[int],
@@ -419,7 +595,7 @@ class ExperimentRunner:
             cfg['features'] = self.args.features
             cfg['target'] = self.args.target
             cfg['use_gpu'] = getattr(self.args, 'use_gpu', False)
-            cfg['mean_shift'] = getattr(self.args, 'revin', False)
+            cfg['revin_type'] = getattr(self.args, 'revin_type', 'none')
 
         return configs
 
@@ -516,7 +692,7 @@ class ExperimentRunner:
                     logger.warning(f"  -> 失败: {result.get('error', 'unknown')}")
 
     def _save_log(self):
-        """保存实验日志"""
+        """保存实验日志 + summary_metrics.csv"""
         log = {
             'timestamp': datetime.now().isoformat(),
             'metadata': {
@@ -527,10 +703,16 @@ class ExperimentRunner:
             'experiments': []
         }
 
+        # 汇总 CSV 行
+        csv_rows = []
+
         for r in self.results:
+            cfg = r['config']
+            m = r['metrics']
+
             exp_entry = {
-                'config': r['config'],
-                'metrics': r.get('metrics', {}),
+                'config': cfg,
+                'metrics': m,
                 'status': r['status'],
                 'elapsed': r.get('elapsed', 0),
             }
@@ -544,9 +726,35 @@ class ExperimentRunner:
 
             log['experiments'].append(exp_entry)
 
+            # CSV 行
+            csv_rows.append({
+                'exp_id': r.get('exp_id', ''),
+                'model': cfg.get('model_name', ''),
+                'seq_len': cfg.get('seq_len', 0),
+                'pred_len': cfg.get('pred_len', 0),
+                'revin_type': cfg.get('revin_type', 'none'),
+                'MAE': m.get('MAE', ''),
+                'MSE': m.get('MSE', ''),
+                'RMSE': m.get('RMSE', ''),
+                'MAPE': m.get('MAPE', ''),
+                'RSE': m.get('RSE', ''),
+                'CORR': m.get('CORR', ''),
+                'status': r['status'],
+                'elapsed': r.get('elapsed', ''),
+                'exp_dir': r.get('exp_dir', ''),
+            })
+
         log_path = os.path.join(RESULTS_DIR, 'experiment_log.json')
         with open(log_path, 'w', encoding='utf-8') as f:
             json.dump(log, f, indent=2, ensure_ascii=False)
+
+        # 生成 summary_metrics.csv
+        import pandas as pd
+        if csv_rows:
+            df = pd.DataFrame(csv_rows)
+            csv_path = os.path.join(RESULTS_DIR, 'summary_metrics.csv')
+            df.to_csv(csv_path, index=False, encoding='utf-8')
+            logger.info("Summary CSV 已保存: " + csv_path)
 
         self._print_summary()
 
@@ -555,29 +763,29 @@ class ExperimentRunner:
         success = [r for r in self.results if r['status'] == 'success']
         failed = [r for r in self.results if r['status'] == 'failed']
 
-        logger.info("=" * 60)
-        logger.info(f"实验完成: {len(success)}/{len(self.results)} 成功 {len(failed)} 失败")
-        logger.info("=" * 60)
+        logger.info("=" * 70)
+        logger.info("时序预测基线模型实验系统  [v3.0]")
+        logger.info("=" * 70)
+        logger.info("exp_id                                    | model            | revin | seq  | pred |  MAE   |  MSE")
+        logger.info("-" * 70)
+        for r in self.results:
+            cfg = r['config']
+            m = r['metrics']
+            eid = (r.get('exp_id', '') or '')[:40]
+            revin = cfg.get('revin_type', 'none')[:6]
+            mae = "%.4f" % m.get('MAE', 0)
+            mse = "%.4f" % m.get('MSE', 0)
+            sep = "pred" if r['status'] == 'success' else "FAIL"
+            logger.info("%-42s %-16s %-7s %-5d %-5d %-8s %s (%s)"
+                        % (eid, cfg.get('model_name', ''), revin,
+                           cfg.get('seq_len', 0), cfg.get('pred_len', 0),
+                           mae, mse, sep))
 
-        if success:
-            logger.info("{:<18} {:>10} {:>10} {:>10} {:>10}".format(
-                "模型", "seq_len", "pred_len", "MAE", "MSE"))
-            logger.info("-" * 60)
-            for r in success:
-                cfg = r['config']
-                m = r['metrics']
-                logger.info("{:<18} {:>10} {:>10} {:>10.4f} {:>10.4f}".format(
-                    cfg['model_name'], cfg['seq_len'], cfg['pred_len'],
-                    m.get('MAE', 0), m.get('MSE', 0)))
-
-        if failed:
-            logger.warning("失败实验:")
-            for r in failed:
-                cfg = r['config']
-                logger.warning(f"  - {cfg['model_name']} seq={cfg['seq_len']} "
-                               f"pred={cfg['pred_len']}: {r.get('error', '')}")
-
-        logger.info(f"\n日志已保存: {os.path.join(RESULTS_DIR, 'experiment_log.json')}")
+        logger.info("-" * 70)
+        logger.info("实验完成: " + str(len(success)) + "/" + str(len(self.results))
+                    + " 成功 " + str(len(failed)) + " 失败")
+        logger.info("日志: " + os.path.join(RESULTS_DIR, 'experiment_log.json'))
+        logger.info("汇总: " + os.path.join(RESULTS_DIR, 'summary_metrics.csv'))
 
 
 # ============================================================
@@ -662,9 +870,10 @@ def parse_args():
                        help='并行进程数（最大 4）')
     parser.add_argument('--use_gpu', action='store_true',
                        help='若 torch.cuda 可用则在 GPU 上做张量距离/投影（PatternSearch/LSH/SAX）')
-    parser.add_argument('--revin', action='store_true',
-                       help='启用 RevIN（可逆实例归一化）：训练/推理阶段均对 X/Y 执行 '
-                            '(X-mean)/std 归一化，预测后用 Y_pred*std+mean 反归一化')
+    parser.add_argument('--revin_type', type=str, default='none',
+                       choices=['none', 'temporal', 'feature', 'dual'],
+                       help='归一化类型：none=无归一化, temporal=时间维度 InstanceNorm, '
+                            'feature=特征维度 ChannelNorm, dual=先 feature 再 temporal')
 
     return parser.parse_args()
 
