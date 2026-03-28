@@ -76,9 +76,10 @@ os.makedirs(os.path.join(RESULTS_DIR, 'logs'), exist_ok=True)
 # ============================================================
 
 MODEL_REGISTRY = {
+    # ── 传统记忆检索 ──────────────────────────────────────────
     'PatternSearch': {
         'class': None,
-        'params': ['top_k', 'weighted']
+        'params': ['top_k', 'weighted', 'predict_chunk_size']
     },
     'LSHSearch': {
         'class': None,
@@ -89,18 +90,46 @@ MODEL_REGISTRY = {
         'class': None,
         'params': ['word_size', 'alphabet_size', 'epsilon_threshold',
                    'bucket_top_k', 'weighted']
-    }
+    },
+    # ── v3.0 新增检索模型 ───────────────────────────────────
+    'DTWSearch': {
+        'class': None,
+        'params': ['top_k', 'dtw_radius', 'weighted', 'predict_chunk_size']
+    },
+    'MatrixProfileSearch': {
+        'class': None,
+        'params': ['top_k', 'subsequence_length', 'normalize']
+    },
+    'TS2VecSearch': {
+        'class': None,
+        'params': ['hidden_dim', 'epochs', 'batch_size', 'top_k',
+                   'lr', 'temperature']
+    },
+    'RAGSearch': {
+        'class': None,
+        'params': ['d_model', 'n_heads', 'epochs', 'batch_size',
+                   'lr', 'weight_decay']
+    },
 }
 
 
 def import_models():
-    """延迟导入模型类"""
+    """延迟导入所有模型类"""
     from models.PatternSearch import PatternSearch
     from models.LSHSearch import LSHSearch
     from models.SAXSearch import SAXSearch
+    from models.DTWSearch import DTWSearch
+    from models.MatrixProfileSearch import MatrixProfileSearch
+    from models.TS2VecSearch import TS2VecSearch
+    from models.RAGSearch import RAGSearch
+
     MODEL_REGISTRY['PatternSearch']['class'] = PatternSearch
     MODEL_REGISTRY['LSHSearch']['class'] = LSHSearch
     MODEL_REGISTRY['SAXSearch']['class'] = SAXSearch
+    MODEL_REGISTRY['DTWSearch']['class'] = DTWSearch
+    MODEL_REGISTRY['MatrixProfileSearch']['class'] = MatrixProfileSearch
+    MODEL_REGISTRY['TS2VecSearch']['class'] = TS2VecSearch
+    MODEL_REGISTRY['RAGSearch']['class'] = RAGSearch
 
 
 # ============================================================
@@ -575,17 +604,80 @@ class ExperimentRunner:
         seq_lens = self.args.seq_len if self.args.seq_len else [96]
         pred_lens = self.args.pred_len if self.args.pred_len else [48]
 
-        all_configs = [
-            {'model_name': 'PatternSearch', 'top_k': self.args.top_k, 'weighted': self.args.weighted},
-            {'model_name': 'LSHSearch', 'n_hash_funcs': self.args.n_hash_funcs,
-             'n_tables': self.args.n_tables, 'hamming_radius': self.args.hamming_radius,
-             'candidate_cap_per_table': self.args.candidate_cap_per_table,
-             'candidate_cap_total': self.args.candidate_cap_total,
-             'weighted': self.args.lsh_weighted},
-            {'model_name': 'SAXSearch', 'word_size': self.args.word_size,
-             'alphabet_size': self.args.alphabet_size, 'epsilon_threshold': self.args.epsilon_threshold,
-             'bucket_top_k': self.args.bucket_top_k, 'weighted': self.args.sax_weighted},
-        ]
+        all_configs = []
+
+        for m in models:
+            cfg = {'model_name': m}
+
+            # ── PatternSearch ─────────────────────────────────────
+            if m == 'PatternSearch':
+                cfg.update({
+                    'top_k': self.args.top_k,
+                    'weighted': self.args.weighted,
+                    'predict_chunk_size': getattr(self.args, 'predict_chunk_size', 2048),
+                })
+
+            # ── LSHSearch ───────────────────────────────────────
+            elif m == 'LSHSearch':
+                cfg.update({
+                    'n_hash_funcs': self.args.n_hash_funcs,
+                    'n_tables': self.args.n_tables,
+                    'hamming_radius': self.args.hamming_radius,
+                    'candidate_cap_per_table': self.args.candidate_cap_per_table,
+                    'candidate_cap_total': self.args.candidate_cap_total,
+                    'weighted': self.args.lsh_weighted,
+                })
+
+            # ── SAXSearch ───────────────────────────────────────
+            elif m == 'SAXSearch':
+                cfg.update({
+                    'word_size': self.args.word_size,
+                    'alphabet_size': self.args.alphabet_size,
+                    'epsilon_threshold': self.args.epsilon_threshold,
+                    'bucket_top_k': self.args.bucket_top_k,
+                    'weighted': self.args.sax_weighted,
+                })
+
+            # ── DTWSearch (v3.0 新增) ───────────────────────────
+            elif m == 'DTWSearch':
+                cfg.update({
+                    'top_k': self.args.top_k,
+                    'dtw_radius': getattr(self.args, 'dtw_radius', 5),
+                    'weighted': self.args.weighted,
+                    'predict_chunk_size': getattr(self.args, 'predict_chunk_size', 512),
+                })
+
+            # ── MatrixProfileSearch (v3.0 新增) ─────────────────
+            elif m == 'MatrixProfileSearch':
+                cfg.update({
+                    'top_k': self.args.top_k,
+                    'subsequence_length': getattr(self.args, 'subsequence_length', None),
+                    'normalize': getattr(self.args, 'mp_normalize', True),
+                })
+
+            # ── TS2VecSearch (v3.0 新增) ─────────────────────────
+            elif m == 'TS2VecSearch':
+                cfg.update({
+                    'hidden_dim': getattr(self.args, 'hidden_dim', 64),
+                    'epochs': getattr(self.args, 'ts2vec_epochs', 10),
+                    'batch_size': getattr(self.args, 'ts2vec_batch_size', 128),
+                    'top_k': self.args.top_k,
+                    'lr': getattr(self.args, 'ts2vec_lr', 1e-3),
+                    'temperature': getattr(self.args, 'temperature', 0.1),
+                })
+
+            # ── RAGSearch (v3.0 新增) ───────────────────────────
+            elif m == 'RAGSearch':
+                cfg.update({
+                    'd_model': getattr(self.args, 'rag_d_model', 32),
+                    'n_heads': getattr(self.args, 'rag_n_heads', 4),
+                    'epochs': getattr(self.args, 'rag_epochs', 10),
+                    'batch_size': getattr(self.args, 'rag_batch_size', 128),
+                    'lr': getattr(self.args, 'rag_lr', 1e-3),
+                    'weight_decay': getattr(self.args, 'rag_weight_decay', 1e-4),
+                })
+
+            all_configs.append(cfg)
 
         configs = _expand_configs(models, seq_lens, pred_lens, all_configs)
 
@@ -828,7 +920,8 @@ def parse_args():
 
     # 模式选择
     parser.add_argument('--model', type=str, default='PatternSearch',
-                       help='模型: PatternSearch, LSHSearch, SAXSearch, all')
+                       help='模型: PatternSearch, LSHSearch, SAXSearch, DTWSearch, '
+                            'MatrixProfileSearch, TS2VecSearch, RAGSearch, all')
     parser.add_argument('--dashboard', action='store_true',
                        help='运行后启动可视化仪表盘')
     parser.add_argument('--skip_run', action='store_true',
@@ -862,6 +955,48 @@ def parse_args():
     parser.add_argument('--epsilon_threshold', type=float, default=1.0)
     parser.add_argument('--bucket_top_k', type=int, default=8)
     parser.add_argument('--sax_weighted', type=lambda x: x.lower() == 'true', default=True)
+
+    # ── v3.0 新增模型参数 ─────────────────────────────────────────
+
+    # 通用参数（跨模型共享）
+    parser.add_argument('--predict_chunk_size', type=int, default=512,
+                       help='预测时分块大小（DTWSearch）')
+
+    # DTWSearch
+    parser.add_argument('--dtw_radius', type=int, default=5,
+                       help='DTW Sakoe-Chiba 约束窗口半径，默认 5')
+
+    # MatrixProfileSearch
+    parser.add_argument('--subsequence_length', type=int, default=None,
+                       help='MatrixProfile 子序列长度（None=seq_len）')
+    parser.add_argument('--mp_normalize', type=lambda x: x.lower() == 'true', default=True,
+                       help='MatrixProfile 是否 z-normalize')
+
+    # TS2VecSearch
+    parser.add_argument('--hidden_dim', type=int, default=64,
+                       help='TS2Vec / RAG 隐向量维度，默认 64')
+    parser.add_argument('--ts2vec_epochs', type=int, default=10,
+                       help='TS2Vec 对比学习训练轮数，默认 10')
+    parser.add_argument('--ts2vec_batch_size', type=int, default=128,
+                       help='TS2Vec 训练批大小，默认 128')
+    parser.add_argument('--ts2vec_lr', type=float, default=1e-3,
+                       help='TS2Vec 学习率，默认 1e-3')
+    parser.add_argument('--temperature', type=float, default=0.1,
+                       help='对比损失温度，默认 0.1')
+
+    # RAGSearch
+    parser.add_argument('--rag_d_model', type=int, default=32,
+                       help='RAG Cross-Attention 隐向量维度，默认 32')
+    parser.add_argument('--rag_n_heads', type=int, default=4,
+                       help='RAG 注意力头数，默认 4')
+    parser.add_argument('--rag_epochs', type=int, default=10,
+                       help='RAG 训练轮数，默认 10')
+    parser.add_argument('--rag_batch_size', type=int, default=128,
+                       help='RAG 训练批大小，默认 128')
+    parser.add_argument('--rag_lr', type=float, default=1e-3,
+                       help='RAG 学习率，默认 1e-3')
+    parser.add_argument('--rag_weight_decay', type=float, default=1e-4,
+                       help='RAG 权重衰减，默认 1e-4')
 
     # 执行参数
     parser.add_argument('--parallel', action='store_true',

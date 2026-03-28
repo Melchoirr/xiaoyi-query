@@ -1,17 +1,21 @@
 # 时序预测基线模型
 
-基于记忆检索的时序预测，包含三种算法：**PatternSearch** (KNN)、**LSHSearch** (局部敏感哈希)、**SAXSearch** (符号聚合近似)。
+基于记忆检索的时序预测，包含七种算法：
+- **传统检索**：PatternSearch (KNN)、LSHSearch (LSH)、SAXSearch (SAX)
+- **v3.0 新增**：DTWSearch (DTW 弹性对齐)、MatrixProfileSearch (矩阵轮廓)、TS2VecSearch (深度对比学习)、RAGSearch (Cross-Attention 记忆网络)
 
 ## 安装
 
 ```bash
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm matplotlib pandas
+pip install tslearn stumpy faiss-cpu   # v3.0 新增依赖
 ```
 
 ## 重要更新 (v3.0 Dual-Dimension RevIN + 静态可视化)
 
 | 变更类型 | 变更内容 |
 |---------|---------|
+| **v3.1 新增模型** | 新增 DTWSearch（DTW Sakoe-Chiba）、MatrixProfileSearch（stumpy MASS）、TS2VecSearch（Dilated CNN + faiss）、RAGSearch（Cross-Attention 端到端）共 4 个模型；MODEL_REGISTRY 扩展至 7 个模型；命令行新增 --dtw_radius, --hidden_dim, --rag_d_model 等专属超参数 |
 | **Dual-Dimension RevIN（v3.0 新增）** | `--revin_type` 支持 `none` / `temporal` / `feature` / `dual` 四种模式；`temporal` 对齐时间维度，`feature` 对齐特征维度，`dual` 先 feature 再 temporal；所有路径含 std < 1e-5 数值安全防御 |
 | **目录规范（v3.0 新增）** | 每个实验存入独立文件夹 `results/{exp_id}/`，内含 `params.json`、`metrics.json`、`preds.npy`、`trues.npy`、`X_test.npy`、`visualization.png` |
 | **静态可视化（v3.0 新增）** | 实验结束时自动调用 `plot_comparison_samples` 生成四段线对比 PNG（Historical Lookback / Hist.Pred / Test Input / Pred vs True）；`plot_summary_bar` 生成指标柱状图 |
@@ -61,7 +65,7 @@ python run.py --skip_run --dashboard
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--model` | PatternSearch | 模型: PatternSearch / LSHSearch / SAXSearch / all |
+| `--model` | PatternSearch | 模型: PatternSearch / LSHSearch / SAXSearch / DTWSearch / MatrixProfileSearch / TS2VecSearch / RAGSearch / all |
 | `--seq_len` | 96 | 输入序列长度（TSLib 标准：96, 192, 336, 720） |
 | `--pred_len` | 48 | 预测序列长度（TSLib 标准：96, 192, 336, 720） |
 | `--features` | M | M=多变量, S=单变量 |
@@ -89,6 +93,18 @@ python run.py --model LSHSearch --n_hash_funcs 16 --n_tables 4 --candidate_cap_t
 
 # SAXSearch
 python run.py --model SAXSearch --word_size 8 --alphabet_size 8 --bucket_top_k 8
+
+# DTWSearch (v3.0)
+python run.py --model DTWSearch --top_k 5 --dtw_radius 5 --weighted True
+
+# MatrixProfileSearch (v3.0)
+python run.py --model MatrixProfileSearch --top_k 5 --mp_normalize True
+
+# TS2VecSearch (v3.0)
+python run.py --model TS2VecSearch --hidden_dim 64 --ts2vec_epochs 10 --batch_size 128 --top_k 5
+
+# RAGSearch (v3.0)
+python run.py --model RAGSearch --rag_d_model 32 --rag_n_heads 4 --rag_epochs 10 --batch_size 128
 ```
 
 ## 输出结构
@@ -179,7 +195,11 @@ bash scripts/run_experiments.sh --dry-run
 ├── models/
 │   ├── PatternSearch.py        # KD-Tree KNN（float32 + torch.cdist + gc）
 │   ├── LSHSearch.py            # 局部敏感哈希（uint64 打包 + 两阶段重排）
-│   └── SAXSearch.py            # 符号聚合近似（NearestNeighbors 模糊匹配）
+│   ├── SAXSearch.py            # 符号聚合近似（NearestNeighbors 模糊匹配）
+│   ├── DTWSearch.py            # DTW 弹性对齐（Sakoe-Chiba 约束 + chunked 处理，v3.0）
+│   ├── MatrixProfileSearch.py  # 矩阵轮廓（stumpy MASS + z-normalized 距离轮廓，v3.0）
+│   ├── TS2VecSearch.py         # 深度对比学习（Dilated CNN + faiss 向量检索，v3.0）
+│   └── RAGSearch.py            # Cross-Attention 记忆网络（端到端训练，v3.0）
 ├── data_provider/
 │   └── data_loader.py          # 数据加载（TSLib 固定边界 + float32）
 ├── dashboard/
@@ -241,6 +261,10 @@ def _safe_std(std, threshold=1e-5):
 | PatternSearch | 精确 | O(log n) | 欧氏距离，逆距离加权，GPU 加速 |
 | LSHSearch | 近似 | O(1) | 随机投影，uint64 打包，两阶段重排 |
 | SAXSearch | 模糊 | O(n) | PAA 降维，NearestNeighbors 模糊匹配 |
+| DTWSearch | 弹性对齐 | O(n·w) | Sakoe-Chiba 约束，tslearn/pytorch 双引擎，chunked 防 OOM（v3.0） |
+| MatrixProfileSearch | 精确子序列 | O(n·log n) | stumpy MASS FFT 加速，z-normalized 距离轮廓（v3.0） |
+| TS2VecSearch | 深度表示 | O(n) | Dilated CNN 对比编码，faiss 向量库极速检索（v3.0） |
+| RAGSearch | 端到端 | O(n) | Cross-Attention 记忆网络，MSE 端到端训练（v3.0） |
 
 ## 内存优化（v2.0）
 
@@ -359,6 +383,54 @@ result = run_single_experiment({
     'alphabet_size': 8,
     'revin_type': 'dual',
 })
+
+# ── v3.0 新增模型使用示例 ───────────────────────────────────
+
+# DTWSearch（DTW 弹性对齐）
+result = run_single_experiment({
+    'model_name': 'DTWSearch',
+    'seq_len': 96,
+    'pred_len': 48,
+    'top_k': 5,
+    'dtw_radius': 5,
+    'weighted': True,
+    'revin_type': 'temporal',
+})
+
+# MatrixProfileSearch（矩阵轮廓）
+result = run_single_experiment({
+    'model_name': 'MatrixProfileSearch',
+    'seq_len': 96,
+    'pred_len': 48,
+    'top_k': 5,
+    'normalize': True,
+    'revin_type': 'temporal',
+})
+
+# TS2VecSearch（深度对比学习 + faiss）
+result = run_single_experiment({
+    'model_name': 'TS2VecSearch',
+    'seq_len': 96,
+    'pred_len': 48,
+    'hidden_dim': 64,
+    'epochs': 10,
+    'batch_size': 128,
+    'top_k': 5,
+    'revin_type': 'temporal',
+})
+
+# RAGSearch（Cross-Attention 记忆网络）
+result = run_single_experiment({
+    'model_name': 'RAGSearch',
+    'seq_len': 96,
+    'pred_len': 48,
+    'd_model': 32,
+    'n_heads': 4,
+    'epochs': 10,
+    'batch_size': 128,
+    'revin_type': 'temporal',
+})
+
 # 返回值含 exp_id / exp_dir / metrics / preview
 
 # 批量运行（自动生成 summary_metrics.csv）
@@ -379,3 +451,14 @@ plot_comparison_samples(
 )
 plot_summary_bar('results/summary_metrics.csv', metric='MAE')
 ```
+
+## 版本历史
+
+| 版本 | 更新内容 |
+|------|---------|
+| **v3.1** | 新增 4 个前沿模型：DTWSearch（DTW 弹性对齐）、MatrixProfileSearch（stumpy 矩阵轮廓）、TS2VecSearch（深度对比学习 + faiss）、RAGSearch（Cross-Attention 记忆网络）；完整注册到 MODEL_REGISTRY；新增 v3.0 模型专属超参数（--dtw_radius, --hidden_dim, --rag_d_model 等）|
+| **v3.0** | Dual-Dimension RevIN（temporal/feature/dual）、目录规范化（results/{exp_id}/）、静态可视化（plotting.py 四段线网格图）、summary_metrics.csv、scripts/run_experiments.sh 参数扫描 + tee 日志 |
+| **v2.9** | RevIN 数值安全（std < 1e-5 强制置 1.0）、全物理尺度 JSON 落盘 |
+| **v2.1** | Streamlit Dashboard 交互式探查、auto-refresh 增强 |
+| **v2.0** | 内存优化（chunked 处理、gc.collect()、float32）、并行实验 |
+| **v1.0** | PatternSearch / LSHSearch / SAXSearch 基线实现 |

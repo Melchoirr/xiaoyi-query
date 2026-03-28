@@ -27,7 +27,7 @@ LOG_DIR="$RESULTS_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # ── 默认参数 ────────────────────────────────────────────────────────
-MODELS="${MODELS:-PatternSearch,LSHSearch,SAXSearch}"
+MODELS="${MODELS:-PatternSearch,LSHSearch,SAXSearch,DTWSearch,MatrixProfileSearch,TS2VecSearch,RAGSearch}"
 SEQ_LENS="${SEQ_LENS:-96,192}"
 PRED_LENS="${PRED_LENS:-48,96}"
 REVIN_TYPES="${REVIN_TYPES:-none,temporal,feature,dual}"
