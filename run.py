@@ -282,10 +282,14 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
             model_params[param] = config.get(param, _get_default(param))
 
         import torch
-        use_gpu = bool(config.get('use_gpu', False))
-        device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
-        if use_gpu and device == 'cpu':
-            log.warning(f"[{model_name}] 请求 GPU 但不可用，回退 CPU")
+        # ── GPU 自动检测：CUDA 可用时自动升格（不受 --use_gpu 限制）─────────
+        if torch.cuda.is_available():
+            device = 'cuda'
+            log.info(f"[{model_name}] CUDA 可用，device=cuda")
+        else:
+            device = 'cpu'
+            if config.get('use_gpu', False):
+                log.warning(f"[{model_name}] 请求 GPU 但不可用，回退 CPU")
         model_params['device'] = device
         log.info(f"[{model_name}] device={device}, revin_type={revin_type}")
 
@@ -523,22 +527,48 @@ def _get_default(param: str) -> Any:
 
 
 def _make_exp_id(model_name: str, seq_len: int, pred_len: int, config: Dict) -> str:
-    """生成实验ID（含 revin_type 后缀避免同名冲突）"""
+    """生成实验ID（含模型专属超参数后缀 + revin_type，避免同名冲突）"""
     dataset = config.get('data_path', 'ETTm1.csv').replace('.csv', '')
     revin = config.get('revin_type', 'none')
     revin_suffix = '_R' + revin[0].upper() if revin and revin != 'none' else ''
 
+    base = dataset + "_" + model_name + "_seq" + str(seq_len) + "_pred" + str(pred_len)
+
     if model_name == 'PatternSearch':
-        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
-                + "_k" + str(config.get('top_k', 5)) + revin_suffix)
+        return base + "_k" + str(config.get('top_k', 5)) + revin_suffix
     elif model_name == 'LSHSearch':
-        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
-                + "_lsh_h" + str(config.get('n_hash_funcs', 16))
-                + "_t" + str(config.get('n_tables', 4)) + revin_suffix)
+        return (base
+                + "_h" + str(config.get('n_hash_funcs', 16))
+                + "_t" + str(config.get('n_tables', 4))
+                + revin_suffix)
+    elif model_name == 'SAXSearch':
+        return (base
+                + "_w" + str(config.get('word_size', 8))
+                + "_a" + str(config.get('alphabet_size', 8))
+                + revin_suffix)
+    elif model_name == 'DTWSearch':
+        return (base
+                + "_k" + str(config.get('top_k', 5))
+                + "_r" + str(config.get('dtw_radius', 5))
+                + revin_suffix)
+    elif model_name == 'MatrixProfileSearch':
+        return (base
+                + "_k" + str(config.get('top_k', 5))
+                + revin_suffix)
+    elif model_name == 'TS2VecSearch':
+        return (base
+                + "_hd" + str(config.get('hidden_dim', 64))
+                + "_e" + str(config.get('epochs', 10))
+                + "_k" + str(config.get('top_k', 5))
+                + revin_suffix)
+    elif model_name == 'RAGSearch':
+        return (base
+                + "_dm" + str(config.get('d_model', 32))
+                + "_nh" + str(config.get('n_heads', 4))
+                + "_e" + str(config.get('epochs', 10))
+                + revin_suffix)
     else:
-        return (dataset + "_seq" + str(seq_len) + "_pred" + str(pred_len)
-                + "_sax_w" + str(config.get('word_size', 8))
-                + "_a" + str(config.get('alphabet_size', 8)) + revin_suffix)
+        return base + revin_suffix
 
 
 def _expand_configs(model_list: List[str], seq_lens: List[int], pred_lens: List[int],

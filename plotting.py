@@ -25,14 +25,22 @@ import os
 import sys
 import json
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.patches import Patch
 from typing import Optional, Dict, Any, List
 
-# 非交互式后端（兼容无 DISPLAY 环境）
-matplotlib.use('Agg')
+# 软导入 matplotlib（venv 中可能未安装）
+try:
+    import matplotlib
+    matplotlib.use('Agg')   # 非交互式后端
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from matplotlib.patches import Patch
+    _HAS_MATPLOTLIB = True
+except ImportError:
+    plt = None
+    gridspec = None
+    Patch = None
+    _HAS_MATPLOTLIB = False
+    # 不 raise，用户会看到友好错误
 
 
 # ─────────────────────────────────────────────────────────────
@@ -77,7 +85,7 @@ def _extract_4segments(
         dict 含四段数据，均为 shape (N,) 的 1D 数组
     """
     def _get(data, idx, fidx, slen):
-        """从展平数据中提取指定样本和特征列"""
+        '''从展平数据中提取指定样本和特征列'''
         if data.ndim == 1:
             return data
         per_feat = data.shape[1] // n_features
@@ -231,14 +239,25 @@ def plot_comparison_samples(
         trues:   shape (n, pred_len * n_features)
         seq_len, pred_len, n_features: 序列参数
         model_name: 模型名称（用于标题）
-        params: 参数字典（用于总图副标题）
-        save_path: PNG 保存路径
-        n_samples: 网格图子图数量（建议 4, 9, 16）
-        figsize: 总图尺寸
-        feat_idx: 要展示的特征索引（-1 = 最后一列 Target）
-        best_matches: 可选，每个样本的最相似匹配信息列表
-        dpi: 图片分辨率
+        params: 参数字典（用于标题展示）
+        save_path: PNG 保存路径（默认不保存）
+        n_samples: 网格图中子图数量（默认 9）
+        figsize: 总图尺寸（默认 (14, 10)）
+        feat_idx: 绘制哪个特征维度（默认 -1 = Target）
+        best_matches: 可选，最相似匹配数据（由模型提供）
+        dpi: PNG 分辨率（默认 120）
     """
+    if not _HAS_MATPLOTLIB:
+        print(
+            "[plotting] WARNING: matplotlib 未安装，无法生成可视化图片。\n"
+            "请运行以下命令安装:\n"
+            f"  /e/Code/Pycharm/xiaoyi-query/.venv/Scripts/python.exe -m pip install matplotlib\n"
+            "或（系统 Python）:\n"
+            "  python -m pip install matplotlib\n"
+            "跳过绘图，不影响实验运行。"
+        )
+        return
+   
     if feat_idx < 0:
         feat_idx = n_features - 1
     feat_idx = min(feat_idx, n_features - 1)
@@ -362,13 +381,17 @@ def plot_summary_bar(
     figsize: tuple = (10, 5)
 ):
     """
-    从 summary_metrics.csv 生成对比柱状图
+    Generate bar chart from summary_metrics.csv
 
     Args:
-        summary_csv: summary_metrics.csv 文件路径
-        metric: 展示的指标（MAE / MSE / RMSE / MAPE）
-        save_path: PNG 保存路径
+        summary_csv: path to summary_metrics.csv
+        metric: metric to plot (MAE / MSE / RMSE / MAPE)
+        save_path: PNG save path
     """
+    if not _HAS_MATPLOTLIB:
+        print("[plotting] matplotlib 未安装，跳过 summary 柱状图。")
+        return
+
     import pandas as pd
 
     if not os.path.exists(summary_csv):
