@@ -1,5 +1,4 @@
 import argparse
-import torch
 from forecast.exp.exp_long_term_forecasting import Exp_Long_Term_Forecast
 
 
@@ -11,7 +10,7 @@ def main():
                         help='single: 单模型训练/测试; fusion: XGBoost 融合')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST', 'Sundial', 'Chronos', 'Timer', 'Moirai'])
+                        choices=['DLinear', 'PatchTST'])
     parser.add_argument('--fusion_models', type=str,
                         default='DLinear,PatchTST',
                         help='fusion 模式下参与融合的模型，逗号分隔')
@@ -57,12 +56,6 @@ def main():
     parser.add_argument('--head_dropout', type=float, default=0.0,
                         help='prediction head dropout')
 
-    # Foundation model configs
-    parser.add_argument('--sundial_model', type=str, default='thuml/sundial-base-128m')
-    parser.add_argument('--chronos_model', type=str, default='amazon/chronos-2')
-    parser.add_argument('--timer_model', type=str, default='thuml/timer-base-84m')
-    parser.add_argument('--moirai_model', type=str, default='Salesforce/moirai-2.0-R-small')
-
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -99,16 +92,6 @@ def main():
     if args.fc_dropout is None:
         args.fc_dropout = args.dropout
 
-    # Foundation model device config
-    ZERO_SHOT_MODELS = ('Sundial', 'Chronos', 'Timer', 'Moirai')
-    if args.model in ZERO_SHOT_MODELS:
-        if args.use_gpu and torch.cuda.is_available():
-            args.device = f'cuda:{args.gpu}'
-        elif args.use_gpu and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            args.device = 'mps'
-        else:
-            args.device = 'cpu'
-
     setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
 
     if args.mode == 'fusion':
@@ -121,7 +104,7 @@ def main():
     else:
         exp = Exp_Long_Term_Forecast(args)
 
-        if args.is_training and args.model not in ZERO_SHOT_MODELS:
+        if args.is_training:
             print(f'>>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>>')
             exp.train(setting)
 
@@ -133,13 +116,11 @@ def main():
 
         if args.save_val_pred:
             print(f'>>>>>>>saving val predictions : {setting}<<<<<<<<<<<<<<<<<<')
-            load_ckpt = 0 if args.model in ZERO_SHOT_MODELS else 1
-            exp.test(setting, test=load_ckpt, flag='val')
+            exp.test(setting, test=1, flag='val')
 
         if args.save_train_pred:
             print(f'>>>>>>>saving train predictions : {setting}<<<<<<<<<<<<<<<<<<')
-            load_ckpt = 0 if args.model in ZERO_SHOT_MODELS else 1
-            exp.test(setting, test=load_ckpt, flag='train')
+            exp.test(setting, test=1, flag='train')
 
     print('Done!')
 

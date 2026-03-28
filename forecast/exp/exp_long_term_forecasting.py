@@ -138,12 +138,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
-                if self.args.model in ('Sundial', 'Chronos', 'Timer', 'Moirai'):
-                    outputs = self.model.predict(batch_x)
-                    outputs = torch.from_numpy(outputs).float()
-                else:
-                    outputs = self.model(batch_x)
-                    outputs = outputs.detach().cpu()
+                outputs = self.model(batch_x)
+                outputs = outputs.detach().cpu()
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, :, f_dim:]
