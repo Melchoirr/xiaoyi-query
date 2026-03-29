@@ -7,8 +7,14 @@
 ## 安装
 
 ```bash
+# 核心依赖
 pip install numpy pandas scikit-learn scipy rich streamlit plotly torch psutil tqdm matplotlib pandas
-pip install tslearn stumpy faiss-cpu   # v3.0 新增依赖
+
+# 时序专用库（推荐安装，提升对应模型性能）
+pip install tslearn stumpy faiss-cpu
+
+# 可选依赖（TS2VecSearch 无 faiss 时的 fallback）
+pip install scipy
 ```
 
 ## 重要更新 (v3.0 Dual-Dimension RevIN + 静态可视化)
