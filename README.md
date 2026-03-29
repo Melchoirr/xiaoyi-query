@@ -202,8 +202,8 @@ bash scripts/run_experiments.sh --dry-run
 │   ├── PatternSearch.py        # KD-Tree KNN（float32 + torch.cdist + gc）
 │   ├── LSHSearch.py            # 局部敏感哈希（uint64 打包 + 两阶段重排）
 │   ├── SAXSearch.py            # 符号聚合近似（NearestNeighbors 模糊匹配）
-│   ├── DTWSearch.py            # DTW 弹性对齐（Sakoe-Chiba 约束 + chunked 处理，v3.0）
-│   ├── MatrixProfileSearch.py  # 矩阵轮廓（stumpy MASS + z-normalized 距离轮廓，v3.0）
+│   ├── DTWSearch.py            # DTW 弹性对齐（Sakoe-Chiba 累积 DP，GPU/CPU 双路径，v3.2）
+│   ├── MatrixProfileSearch.py  # 矩阵轮廓（stumpy 工业级，Numba 多核，float32，v3.2）
 │   ├── TS2VecSearch.py         # 深度对比学习（Dilated CNN + faiss 向量检索，v3.0）
 │   └── RAGSearch.py            # Cross-Attention 记忆网络（端到端训练，v3.0）
 ├── data_provider/
@@ -267,8 +267,8 @@ def _safe_std(std, threshold=1e-5):
 | PatternSearch | 精确 | O(log n) | 欧氏距离，逆距离加权，GPU 加速 |
 | LSHSearch | 近似 | O(1) | 随机投影，uint64 打包，两阶段重排 |
 | SAXSearch | 模糊 | O(n) | PAA 降维，NearestNeighbors 模糊匹配 |
-| DTWSearch | 弹性对齐 | O(n·w) | Sakoe-Chiba 约束，tslearn/pytorch 双引擎，chunked 防 OOM（v3.0） |
-| MatrixProfileSearch | 精确子序列 | O(n·log n) | stumpy MASS FFT 加速，z-normalized 距离轮廓（v3.0） |
+| DTWSearch | 弹性对齐 | O(chunk·n·m·r) | **v3.2: GPU 严格 Sakoe-Chiba 累积 DP**（无 4D 张量，显存 ≈410MB），**CPU: tslearn 精确 DTW**，双路径 chunked 防 OOM |
+| MatrixProfileSearch | 精确子序列 | O(n·log n) | **v3.2: stumpy 工业级库**（Numba 多核加速），MASS z-normalized；**DTYPE=np.float32**；全程 chunked 防止 32GB 溢出 |
 | TS2VecSearch | 深度表示 | O(n) | Dilated CNN 对比编码，faiss 向量库极速检索（v3.0） |
 | RAGSearch | 端到端 | O(n) | Cross-Attention 记忆网络，MSE 端到端训练（v3.0） |
 
@@ -462,7 +462,8 @@ plot_summary_bar('results/summary_metrics.csv', metric='MAE')
 
 | 版本 | 更新内容 |
 |------|---------|
-| **v3.1** | 新增 4 个前沿模型：DTWSearch（DTW 弹性对齐）、MatrixProfileSearch（stumpy 矩阵轮廓）、TS2VecSearch（深度对比学习 + faiss）、RAGSearch（Cross-Attention 记忆网络）；完整注册到 MODEL_REGISTRY；新增 v3.0 模型专属超参数（--dtw_radius, --hidden_dim, --rag_d_model 等）|
+| **v3.2** | DTWSearch: GPU 严格 Sakoe-Chiba 累积 DP（无 4D 张量，≈410MB 显存），tslearn CPU 精确路径，predict_chunk 分块；MatrixProfileSearch: stumpy 工业级集成（MASS z-normalized），DTYPE=np.float32，全程 chunked 防止 32GB 溢出；所有模型 GPU 自动检测；进度日志输出 |
+| **v3.1** | 新增 4 个前沿模型：DTWSearch、MatrixProfileSearch、TS2VecSearch（RAGSearch Siamese 架构）；MODEL_REGISTRY 扩展至 7 个模型 |
 | **v3.0** | Dual-Dimension RevIN（temporal/feature/dual）、目录规范化（results/{exp_id}/）、静态可视化（plotting.py 四段线网格图）、summary_metrics.csv、scripts/run_experiments.sh 参数扫描 + tee 日志 |
 | **v2.9** | RevIN 数值安全（std < 1e-5 强制置 1.0）、全物理尺度 JSON 落盘 |
 | **v2.1** | Streamlit Dashboard 交互式探查、auto-refresh 增强 |

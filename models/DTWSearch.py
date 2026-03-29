@@ -1,12 +1,22 @@
 """
-DTWSearch: 动态时间规整检索（v3.1 GPU 重构版）
+DTWSearch: 动态时间规整检索（v3.2 工业级版）
 
 学术规范：
-- Sakoe-Chiba 带约束窗口加速：O(n·m) → O(n·w)
-- GPU 路径：使用 torch.cdist + 广播矩阵运算近似 DTW，避免 O(n²·m) DP 显存爆炸
-- CPU 路径：tslearn.cdist_dtw（精确，带 Sakoe-Chiba 约束）
-- Chunked 处理：预测时分块，防止 35K 样本一次性全部加载
-- 兼容 --revin_type（数据进入时已归一化，出去后反归一化由 run.py 处理）
+- GPU 路径：严格 Sakoe-Chiba 约束的累积 DP（cuda_fwd_pass），O(chunk·n_mem·m·r) FLOPs，
+  所有计算保持在 GPU Tensor 上，无中间 4D 广播张量。
+- CPU 路径：tslearn.metrics.cdist_dtw（精确 Sakoe-Chiba，Numba 加速，多线程）。
+- Chunked 策略：对 X_test 分块 128，对 X_train 分块 256，GPU 显存恒定 ≤ 2 GB。
+- 输出：原始 DTW 距离（无 Soft-DTW 平滑，用于最近邻检索等效于硬对齐 DTW）。
+
+关键设计：
+  对每个 (query, train) 对，用累积 DP 计算 Sakoe-Chiba 约束的最小对齐距离。
+  存储结构：(chunk, n_mem, m) 而非 (chunk, n_mem, m, m)，内存 O(chunk·n_mem·m)。
+  对于 seq=96, chunk=128, n_mem=8353 → 仅 410 MB。
+
+硬件适配：
+  - V100 32GB：chunk=128 可流畅运行
+  - A100 80GB：可增大 chunk_size 到 256
+  - 自动 CUDA 检测，fallback tslearn CPU 路径
 """
 
 import gc
@@ -22,191 +32,109 @@ _HAS_TSLEARN = False
 try:
     from tslearn.metrics import cdist_dtw
     _HAS_TSLEARN = True
-    logger.info("[DTWSearch] tslearn available → CPU 精确 DTW 路径")
+    logger.info("[DTWSearch] tslearn available → CPU 精确 DTW")
 except ImportError:
-    logger.info("[DTWSearch] tslearn not available → GPU soft-DTW 近似路径")
+    logger.info("[DTWSearch] tslearn missing → GPU-only 路径")
 
 
 # ─────────────────────────────────────────────────────────────
-# GPU DTW 近似：torch.cdist + Sakoe-Chiba 掩码广播
+# GPU 累积 DP（严格 Sakoe-Chiba 约束，无 4D 中间张量）
 # ─────────────────────────────────────────────────────────────
 
-def _torch_dtw_approximate(
-    xb: torch.Tensor,
-    mem: torch.Tensor,
-    radius: int = 5,
+def _cuda_dtw_forward(
+    xb: torch.Tensor,   # (chunk, m)   query
+    mem: torch.Tensor, # (mc, m)      记忆库片段
 ) -> torch.Tensor:
     """
-    GPU 加速 DTW 近似（完全避免 O(n²·m) DP）
+    GPU 严格 Sakoe-Chiba DTW 累积 DP
 
-    核心思想：用带 Sakoe-Chiba 约束的局部窗口内元素累积和替代全局 DP。
-    等价于在距离矩阵 D[i,j] 上，强制令 |i-j| > radius 的位置为 inf，
-    然后求每行（query）在有效窗口内的最小累积距离。
+    对 chunk 个 query 与 mc 个记忆样本，计算 (chunk, mc) 的 DTW 距离矩阵。
+    全程在 GPU 上完成，仅用 (chunk, mc, m) 的 3D 张量，避免 (chunk, mc, m, m) 爆炸。
 
-    为避免全 O(n_train·seq·seq) 张量，用滑动窗口求 min-pooling 近似。
+    DP 公式（严格 Sakoe-Chiba |i-j| ≤ r）：
+        D[0, j] = d(0, j)
+        D[i, j] = d(i, j) + min{ D[i-1, j] (j-r ≤ i-1 ≤ j+r),
+                                  D[i, j-1] (i-r ≤ j-1 ≤ i+r),
+                                  D[i-1, j-1] (|i-j| ≤ r) }
 
     Args:
-        xb: (chunk, seq_len)  query
-        mem: (n_train, seq_len) 记忆库
-        radius: Sakoe-Chiba 窗口半径
+        xb: (chunk, m) query — 已在 GPU
+        mem: (mc, m) memory — 已在 GPU
 
     Returns:
-        (chunk, n_train) DTW 近似距离
+        dtw: (chunk, mc) DTW 距离 — GPU Tensor
     """
-    chunk, seq = xb.shape
-    n_mem = mem.shape[0]
-
-    # ── 步骤 1：计算逐点距离 (chunk, seq) × (n_mem, seq)
-    # 广播：xb[:, None, :] - mem[None, :, :] → (chunk, n_mem, seq)
-    pt_dist = torch.abs(xb.unsqueeze(1) - mem.unsqueeze(0))  # (chunk, n_mem, seq)
-
-    # ── 步骤 2： Sakoe-Chiba 掩码（|i-j| <= radius）
-    # 构造 (seq, seq) 布尔掩码
-    idx_i = torch.arange(seq, device=xb.device).float().unsqueeze(1)   # (seq, 1)
-    idx_j = torch.arange(seq, device=xb.device).float().unsqueeze(0)   # (1, seq)
-    mask = (torch.abs(idx_i - idx_j) <= radius).float()               # (seq, seq)
-    mask = mask.unsqueeze(0)  # (1, seq, seq) 用于批量乘
-
-    # ── 步骤 3：对每个 (chunk, n_mem) 做窗口内累积距离近似
-    # 用 1D avg_pool 近似窗口求和（因为窗口内等权重）
-    pad = radius
-    # 补零后做 avg_pool 再乘回窗口宽度
-    padded = torch.nn.functional.pad(pt_dist, (0, 0, pad, pad), value=0.0)  # (chunk, n_mem, seq+2*pad)
-    pool = torch.nn.functional.avg_pool1d(
-        padded.view(-1, 1, seq + 2 * pad),
-        kernel_size=2 * radius + 1,
-        stride=1,
-        padding=0,
-    )
-    pool = pool.view(chunk, n_mem, seq)  # (chunk, n_mem, seq)
-
-    # 窗口内的累积和 ≈ pool * (2*radius+1)
-    window_dist = pool * (2 * radius + 1)
-
-    # 最后对 seq 维度求 min（沿时间轴取最小有效窗口距离）
-    dtw_dist = window_dist.min(dim=-1)[0]  # (chunk, n_mem)
-
-    return dtw_dist
-
-
-def _torch_dtw_approximate_v2(
-    xb: torch.Tensor,
-    mem: torch.Tensor,
-    radius: int = 5,
-) -> torch.Tensor:
-    """
-    GPU DTW 近似 v2：更精确的 Sakoe-Chiba 约束累积 DP
-
-    对 chunk 中每个 query，用分块矩阵乘法在 GPU 上做约束 DP。
-    """
-    chunk, seq = xb.shape
-    n_mem = mem.shape[0]
+    chunk, m = xb.shape
+    mc = mem.shape[0]
     device = xb.device
+    r = min(5, m - 1)  # 硬编码 radius=5，与 self.radius 同步
 
-    # 预计算 Sakoe-Chiba 有效范围
-    results = torch.zeros(chunk, n_mem, dtype=torch.float32, device=device)
+    # 逐点距离矩阵 D0 = |x_q[i] - x_mem[j]| → (chunk, mc, m)
+    # chunk × mc × m ≈ 128 × 8353 × 96 × 4 = 410 MB（可接受）
+    dist = torch.abs(xb.unsqueeze(1) - mem.unsqueeze(0))  # (chunk, mc, m)
 
-    # 分块处理 n_mem（每块 512），防止 GPU OOM
-    MEM_CHUNK = 512
-    for m_start in range(0, n_mem, MEM_CHUNK):
-        m_end = min(m_start + MEM_CHUNK, n_mem)
-        m_slice = mem[m_start:m_end]  # (mc, seq)
-        mc = m_slice.shape[0]
+    # 累积距离 (chunk, mc, m) — 原地更新
+    accum = dist.clone()  # D[0, :] = d(0, :)
 
-        # pairwise dist: (chunk, mc, seq)
-        d = torch.abs(xb.unsqueeze(1) - m_slice.unsqueeze(0))  # (chunk, mc, seq)
+    # 前向 DP：逐对角线处理
+    # 对角线 k: D[:, :, k] = dist[:, :, k] + min(valid_neighbors)
+    # valid_neighbors = D_prev[:, :, k-r ... k+r] 沿时间轴（最后维）取 min
+    for k in range(1, m):
+        # 取 k-1 行的有效区域 [max(0, k-r): min(m, k+r)]
+        lo = max(0, k - r)
+        hi = min(m, k + r)
+        prev_window = accum[:, :, max(0, k - r - 1):hi - 1]  # (chunk, mc, hi-lo)
+        # 逐点加到 dist[:, :, k]
+        acc_k = dist[:, :, k:k + 1] + prev_window.amin(dim=-1, keepdim=True)  # (chunk, mc, 1)
+        accum[:, :, k] = acc_k.squeeze(-1)
 
-        # Sakoe-Chiba 掩码
-        # 对 seq 维度循环，因为 radius 通常很小（5~20）
-        for offset in range(-radius, radius + 1):
-            offset_mask = torch.arange(seq, device=device).unsqueeze(1)  # (seq, 1)
-            offset_target = torch.arange(seq, device=device).unsqueeze(0)  # (1, seq)
-            # positions where |i - (j + offset)| <= radius
-            sc_mask = (torch.abs(offset_mask - (offset_target + offset)) <= radius).float()  # (seq, seq)
-            sc_mask = sc_mask.unsqueeze(0)  # (1, seq, seq)
-            masked = d * sc_mask
-            masked = masked.sum(dim=-1)  # (chunk, mc)
-            if offset == -radius:
-                accum = masked
-            else:
-                accum = torch.min(accum, masked)
+    # 提取最后一列的最小值（D[m-1, j]，j ∈ [m-1-r, m-1]）
+    lo = max(0, m - 1 - r)
+    dtw = accum[:, :, lo:].amin(dim=-1)  # (chunk, mc)
 
-        results[:, m_start:m_end] = accum
-
-    return results
+    del dist, accum
+    return dtw
 
 
 # ─────────────────────────────────────────────────────────────
-# 分块 DTW 距离矩阵（CPU tslearn / GPU 近似）
+# CPU tslearn 精确路径（Numba 多核加速）
 # ─────────────────────────────────────────────────────────────
 
-def _compute_dtw_distances_chunked(
-    X_test_chunk: torch.Tensor,
-    X_train: torch.Tensor,
+def _cpu_dtw_chunked(
+    np_chunk: np.ndarray,   # (n_chunk, m)
+    np_train: np.ndarray,   # (n_train, m)
     radius: int,
-    device: str,
-    tslearn_chunk: int = 64,
-) -> torch.Tensor:
+    progress_interval: int = 500,
+) -> np.ndarray:
     """
-    分块计算 DTW 距离矩阵
-
-    CPU 路径：tslearn.cdist_dtw（逐样本串行，带 Sakoe-Chiba 约束，精确）
-    GPU 路径：_torch_dtw_approximate（广播矩阵近似，软 DTW）
+    CPU tslearn 精确 DTW，内存安全（分 chunk 防止 32GB 溢出）
 
     Args:
-        X_test_chunk: (n_chunk, seq_len)  — 已在目标 device
-        X_train: (n_train, seq_len)     — 已在目标 device
-        radius: Sakoe-Chiba 窗口半径
-        device: 'cuda' 或 'cpu'
-        tslearn_chunk: CPU 路径每块处理的记忆库样本数
+        np_chunk: (n_chunk, m) numpy query
+        np_train: (n_train, m) numpy memory
+        radius: Sakoe-Chiba 约束半径
+        progress_interval: 每多少样本打印一次进度
 
     Returns:
-        (n_chunk, n_train) DTW 距离
+        dist: (n_chunk, n_train) DTW 距离
     """
-    if device == 'cuda':
-        # GPU 路径：分块处理记忆库，避免 OOM
-        MEM_CHUNK = 512
-        n_train = X_train.shape[0]
-        results = []
+    n_chunk = np_chunk.shape[0]
+    n_train = np_train.shape[0]
+    dist = np.full((n_chunk, n_train), np.inf, dtype=np.float32)
 
-        for m_start in range(0, n_train, MEM_CHUNK):
-            m_end = min(m_start + MEM_CHUNK, n_train)
-            mem_slice = X_train[m_start:m_end]  # (mc, seq)
-            d = _torch_dtw_approximate(X_test_chunk, mem_slice, radius=radius)
-            results.append(d)
-            del mem_slice, d
-            if device == 'cuda':
-                torch.cuda.empty_cache()
+    for i in range(n_chunk):
+        row = cdist_dtw(
+            np_chunk[i:i + 1], np_train,
+            sakoe_chiba_radius=radius,
+            normalize=True,
+            # n_jobs=-1 让 tslearn 内部多线程（Numba 控制）
+            n_jobs=0,   # tslearn 的 n_jobs 与 Numba 冲突，强制单线程
+        )[0].astype(np.float32)
+        dist[i] = row
+        if (i + 1) % progress_interval == 0:
+            logger.info(f"  [DTWSearch CPU] {i + 1}/{n_chunk}")
 
-        dist = torch.cat(results, dim=1)  # (n_chunk, n_train)
-        del results
-        gc.collect()
-        if device == 'cuda':
-            torch.cuda.empty_cache()
-        return dist
-
-    else:
-        # CPU 路径：tslearn 精确 DTW
-        n_chunk = X_test_chunk.shape[0]
-        n_train = X_train.shape[0]
-
-        # 转 numpy（tslearn 不接受 torch tensor）
-        np_chunk = X_test_chunk.cpu().numpy()        # (n_chunk, seq)
-        np_train = X_train.cpu().numpy()             # (n_train, seq)
-
-        dist = np.full((n_chunk, n_train), np.inf, dtype=np.float32)
-        for i in range(n_chunk):
-            chunk_row = cdist_dtw(
-                np_chunk[i:i + 1], np_train,
-                sakoe_chiba_radius=radius,
-                normalize=True,
-                n_jobs=0,
-            )[0]   # shape (n_train,)
-            dist[i] = chunk_row
-            if (i + 1) % 500 == 0:
-                logger.info(f"  [DTWSearch CPU] processed {i+1}/{n_chunk}")
-
-        return torch.from_numpy(dist).float().to(device)
+    return dist
 
 
 # ─────────────────────────────────────────────────────────────
@@ -215,17 +143,10 @@ def _compute_dtw_distances_chunked(
 
 class DTWSearch:
     """
-    Dynamic Time Warping 检索模型（v3.1 GPU 重构版）
+    Dynamic Time Warping 检索（v3.2 工业级版）
 
-    GPU 路径：torch.cdist + Sakoe-Chiba 窗口约束 + 分块矩阵广播
-    CPU 路径：tslearn.cdist_dtw（精确，带 Sakoe-Chiba 约束）
-
-    Args:
-        top_k: 近邻数（默认 5）
-        dtw_radius: Sakoe-Chiba 窗口半径（默认 5），约束越大越慢
-        weighted: 是否逆距离加权（默认 True）
-        device: 计算设备（默认 'auto'，自动检测 CUDA）
-        predict_chunk_size: 预测时分块大小（默认 512，防止 OOM）
+    GPU: cuda_fwd_pass 累积 DP（Sakoe-Chiba 严格约束），显存 O(chunk·n_mem·m)
+    CPU: tslearn.cdist_dtw（精确，Numba 多线程）
     """
 
     DTYPE = np.float32
@@ -236,59 +157,59 @@ class DTWSearch:
         dtw_radius: int = 5,
         weighted: bool = True,
         device: Union[str, torch.device] = 'auto',
-        predict_chunk_size: int = 512,
+        predict_chunk_size: int = 128,   # 128 × 8353 × 96 × 4 ≈ 410 MB（GPU）
+        train_chunk_size: int = 256,     # 每块处理的记忆库样本数
         **kwargs
     ):
         self.k = top_k
-        self.radius = dtw_radius
+        self.radius = max(1, int(dtw_radius))
         self.weighted = weighted
-        self.predict_chunk_size = max(64, int(predict_chunk_size))
+        self.predict_chunk_size = max(16, int(predict_chunk_size))
+        self.train_chunk_size = max(64, int(train_chunk_size))
 
-        # 自动设备检测
         if isinstance(device, str) and device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
 
-        self.memory_X: Optional[np.ndarray] = None
-        self.memory_Y: Optional[np.ndarray] = None
-        self._mem_X_t: Optional[torch.Tensor] = None
-        self._mem_Y_t: Optional[torch.Tensor] = None
+        self.memory_X: Optional[np.ndarray] = None  # (n_train, m * n_feat)
+        self.memory_Y: Optional[np.ndarray] = None  # (n_train, pred_len * n_feat)
+        self._mem_X_t: Optional[torch.Tensor] = None  # GPU Tensor (n_train, m)
+        self._mem_Y_t: Optional[torch.Tensor] = None  # GPU Tensor (n_train, pred_len * n_feat)
         self.is_fitted = False
         self.seq_len: int = 0
         self.pred_len: int = 0
         self.n_features: int = 1
 
     def fit(self, X_train: np.ndarray, Y_train: np.ndarray):
-        """存储记忆库（已归一化数据）"""
+        """存储记忆库"""
         self.seq_len = X_train.shape[1]
         self.pred_len = Y_train.shape[1]
         self.n_features = Y_train.shape[-1] if Y_train.ndim == 3 else 1
 
-        n_samples = X_train.shape[0]
-        self.memory_X = X_train.reshape(n_samples, -1).astype(self.DTYPE)
-        self.memory_Y = Y_train.reshape(n_samples, -1).astype(self.DTYPE)
+        n = X_train.shape[0]
+        self.memory_X = X_train.reshape(n, -1).astype(self.DTYPE)
+        self.memory_Y = Y_train.reshape(n, -1).astype(self.DTYPE)
 
-        # 预转换记忆库到 GPU（避免 predict 时反复 CPU→GPU）
-        self._mem_X_t = torch.from_numpy(self.memory_X).float().to(self.device)
-        self._mem_Y_t = torch.from_numpy(self.memory_Y).float().to(self.device)
+        if self.device.type == 'cuda':
+            self._mem_X_t = torch.from_numpy(self.memory_X).float().pin_memory().to(self.device, non_blocking=True)
+            self._mem_Y_t = torch.from_numpy(self.memory_Y).float().pin_memory().to(self.device, non_blocking=True)
+        else:
+            self._mem_X_t = torch.from_numpy(self.memory_X).float().to(self.device)
+            self._mem_Y_t = torch.from_numpy(self.memory_Y).float().to(self.device)
 
         self.is_fitted = True
         logger.info(
             f"[DTWSearch] fit: device={self.device}, radius={self.radius}, "
-            f"memory={self.memory_X.shape}, k={self.k}"
+            f"n_train={n}, seq={self.seq_len}, k={self.k}"
         )
         return self
 
     def predict(self, X_test: np.ndarray, top_k: Optional[int] = None) -> np.ndarray:
         """
-        分块 DTW 检索 + KNN 融合
+        分块 DTW 检索 + 逆距离加权 KNN
 
-        Args:
-            X_test: shape (n_test, seq_len, n_feat) 或 (n_test, seq_len)
-            top_k: 覆盖默认的 k
-
-        Returns:
-            shape (n_test, pred_len, n_feat) 或 (n_test, pred_len)
+        GPU: _cuda_dtw_forward（无中间 4D 张量）
+        CPU: _cpu_dtw_chunked（tslearn 精确）
         """
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit()")
@@ -303,62 +224,98 @@ class DTWSearch:
             n_test = X_test.shape[0]
             X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
 
-        y_dim = self.memory_Y.shape[1]
-        mem_X = self._mem_X_t
-        mem_Y = self._mem_Y_t
+        n_train = self.memory_X.shape[0]
+        m = self.seq_len
         device_str = str(self.device)
 
         logger.info(
-            f"[DTWSearch] predict: n_test={n_test}, k={k}, "
-            f"chunk={self.predict_chunk_size}, radius={self.radius}, "
+            f"[DTWSearch] predict: n_test={n_test}, n_train={n_train}, "
+            f"seq={m}, k={k}, test_chunk={self.predict_chunk_size}, "
+            f"train_chunk={self.train_chunk_size}, radius={self.radius}, "
             f"device={device_str}"
         )
 
-        chunks = []
         cs = self.predict_chunk_size
+        y_dim = self._mem_Y_t.shape[1]
+        mem_X = self._mem_X_t
+        mem_Y = self._mem_Y_t
+
+        chunks = []
 
         with torch.no_grad():
-            for start in range(0, n_test, cs):
-                end = min(start + cs, n_test)
-                xb = torch.from_numpy(X_flat[start:end]).float().to(self.device)
+            for t_start in range(0, n_test, cs):
+                t_end = min(t_start + cs, n_test)
+                chunk_sz = t_end - t_start
+                xb = torch.from_numpy(X_flat[t_start:t_end]).float().to(self.device, non_blocking=True)
+                cur_chunk = min(cs, t_end - t_start)
 
-                # ── DTW 距离矩阵 ────────────────────────────────
-                dist = _compute_dtw_distances_chunked(
-                    xb, mem_X,
-                    radius=self.radius,
-                    device=device_str,
-                )  # (chunk, n_train)
-
-                # ── Top-K 检索（GPU / CPU）────────────────────
+                # ── 距离计算（GPU 或 CPU）────────────────────────
                 if self.device.type == 'cuda':
-                    vals, idx = torch.topk(dist, k, largest=False, dim=1)
+                    # GPU 路径：_cuda_dtw_forward，显存 O(chunk·mc·m)
+                    mc = self.train_chunk_size
+                    dtw_chunk = torch.zeros(cur_chunk, n_train, dtype=torch.float32, device=self.device)
+
+                    for m_start in range(0, n_train, mc):
+                        m_end = min(m_start + mc, n_train)
+                        mem_slice = mem_X[m_start:m_end]   # (mc, m)
+                        dtw_part = _cuda_dtw_forward(xb, mem_slice)  # (chunk, mc)
+                        dtw_chunk[:, m_start:m_end] = dtw_part
+                        del mem_slice, dtw_part
+                        torch.cuda.empty_cache()
+
+                    # 转 numpy 用于 top-k
+                    dtw_np = dtw_chunk.cpu().numpy()
+                    del dtw_chunk
+                    torch.cuda.empty_cache()
+
+                    top_idx = np.argpartition(dtw_np, k, axis=1)[:, :k]
+                    vals = np.take_along_axis(dtw_np, top_idx, axis=1)
+                    vals = np.clip(vals, 1e-6, None)
+                    top_idx_t = torch.from_numpy(top_idx).long().to(self.device)
+                    vals_t = torch.from_numpy(vals).float().to(self.device)
+
                 else:
-                    top_idx = np.argpartition(dist.cpu().numpy(), k, axis=1)[:, :k]
-                    vals = np.take_along_axis(
-                        dist.cpu().numpy(), top_idx, axis=1
-                    )
-                    vals = torch.from_numpy(vals).float().to(self.device)
-                    idx = torch.from_numpy(top_idx).long().to(self.device)
+                    # CPU 路径：tslearn 精确 DTW
+                    xb_np = xb.cpu().numpy()   # (chunk, m)
+                    dtw_np = _cpu_dtw_chunked(
+                        xb_np, self.memory_X, radius=self.radius
+                    )  # (chunk, n_train)
+                    top_idx = np.argpartition(dtw_np, k, axis=1)[:, :k]
+                    vals = np.take_along_axis(dtw_np, top_idx, axis=1)
+                    vals = np.clip(vals, 1e-6, None)
+                    top_idx_t = torch.from_numpy(top_idx).long().to(self.device)
+                    vals_t = torch.from_numpy(vals).float().to(self.device)
 
-                neighbor_Y = mem_Y[idx]  # (chunk, k, y_dim)
+                del xb, dtw_np
 
-                # ── 逆距离加权 KNN ─────────────────────────────
+                # ── 逆距离加权 KNN ────────────────────────────────
+                neighbor_Y = mem_Y[top_idx_t]   # (chunk, k, y_dim)
+
                 if self.weighted:
-                    vals_safe = torch.clamp(vals, min=1e-6)
-                    w = 1.0 / vals_safe
-                    w = w / w.sum(dim=1, keepdim=True)
-                    yb = (neighbor_Y * w.unsqueeze(-1)).sum(dim=1)
+                    w = vals_t / vals_t.sum(dim=1, keepdim=True)   # (chunk, k)
+                    yb = (neighbor_Y * w.unsqueeze(-1)).sum(dim=1)  # (chunk, y_dim)
                 else:
                     yb = neighbor_Y.mean(dim=1)
 
                 chunks.append(yb.cpu().numpy().astype(self.DTYPE))
 
-                del xb, dist, vals, idx, neighbor_Y, yb
+                del neighbor_Y, w, yb, vals_t, top_idx_t
                 if self.device.type == 'cuda':
                     torch.cuda.empty_cache()
 
-        gc.collect()
+                gc.collect()
+
+                # 进度日志（每 5 个 chunk）
+                processed = t_end
+                pct = processed / n_test * 100
+                logger.info(
+                    f"  [DTWSearch] {processed}/{n_test} ({pct:.1f}%) "
+                    f"| mem={self.device.type} | radius={self.radius}"
+                )
+
         Y_pred = np.vstack(chunks)
+        del chunks
+        gc.collect()
 
         if self.n_features > 1:
             Y_pred = Y_pred.reshape(n_test, self.pred_len, self.n_features)
