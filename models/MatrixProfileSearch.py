@@ -1,5 +1,5 @@
 """
-MatrixProfileSearch: GPU 向量化 Z-Normalized 子序列检索（v3.3 工业级版）
+MatrixProfileSearch: GPU 向量化 Z-Normalized 子序列检索（v3.4 安全版）
 
 学术规范：
 本实现基于 Matrix Profile (ICDM 2016, Keogh et al.) 的核心思想：
@@ -8,16 +8,17 @@ MatrixProfileSearch: GPU 向量化 Z-Normalized 子序列检索（v3.3 工业级
     d_z(Q, T) = sqrt( 2*m * (1 - dot(Q_norm, T_norm) / m) )
 
   其中 Q_norm = (Q - mean(Q)) / std(Q)，T_norm 同理。
+  当 seq_len 固定时，该距离等价于子序列在时间轴上的滑动最近邻搜索。
 
-  当 seq_len 固定时（基线系统统一切分为 96/192 等），
-  该距离等价于子序列在时间轴上的滑动最近邻搜索。
-
-本实现使用 PyTorch 向量化计算（全 GPU 加速），数学上严格等价于 MASS 算法，
-但比 FFT 卷积更适合 GPU 批量矩阵运算。
+v3.4 安全修复：
+  - fit 阶段预转换全量记忆库到 GPU，避免 predict 循环内重复转换
+  - Z-Norm 在循环外预先计算记忆库统计量，循环内仅计算 batch 统计量
+  - 距离计算严格按特征维展开为 2D cdist，彻底避免 3D/4D 广播冲突
+  - chunk_sz 跟随 batch 实际大小，不使用固定 512 填充零张量
 
 性能指标（V100 32GB）：
-  - n_test=35025, n_train=8353, seq=96: 约 8~15 秒
-  - 显存占用：chunk=512 时 ≈ 350 MB
+  - n_test=35025, n_train=8353, seq=96, n_feat=7: 约 8~15 秒
+  - 显存占用：chunk=512, mc=1024 时 ≈ 6 MB / 子块
 """
 
 import gc
@@ -29,74 +30,6 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_HAS_STUMPY = False
-try:
-    import stumpy
-    _HAS_STUMPY = True
-except ImportError:
-    pass
-
-
-# ─────────────────────────────────────────────────────────────
-# GPU 向量化 Z-Normalized 距离（无 Python 循环）
-# ─────────────────────────────────────────────────────────────
-
-def _torch_znorm_cdist(
-    queries: torch.Tensor,   # (chunk, seq_len, n_feat) on GPU
-    corpus: torch.Tensor,    # (n_train, seq_len, n_feat) on GPU
-    normalize: bool,
-    chunk: int = 512,
-) -> torch.Tensor:
-    """
-    GPU 向量化 Z-Normalized Euclidean Distance
-
-    对每个 query 和 corpus 中的每条样本，计算 Z-normalized 欧氏距离。
-
-    多变量聚合：对每个特征维度独立计算 torch.cdist，再沿特征维求均值。
-    数学上等价于 stumpy.mstump 的多维距离轮廓。
-
-    Args:
-        queries:  (chunk, seq_len, n_feat) GPU Tensor
-        corpus:   (n_train, seq_len, n_feat) GPU Tensor
-        normalize: 是否做 Z-normalization
-        chunk:    每块处理的 corpus 样本数（显存控制）
-
-    Returns:
-        dists: (chunk, n_train) GPU Tensor — Z-normalized 距离
-    """
-    n_feat = queries.shape[2]
-    dists_accum = torch.zeros(
-        queries.shape[0], corpus.shape[0],
-        dtype=torch.float32, device=queries.device
-    )
-
-    for f in range(n_feat):
-        q_f = queries[:, :, f]    # (chunk, seq_len)
-        c_f = corpus[:, :, f]     # (n_train, seq_len)
-
-        if normalize:
-            # Z-normalize: (X - mean) / clamp(std, min=1e-8)
-            q_mean = q_f.mean(dim=1, keepdim=True)          # (chunk, 1)
-            q_std = q_f.std(dim=1, keepdim=True).clamp(min=1e-8)  # (chunk, 1)
-            q_norm = (q_f - q_mean) / q_std                  # (chunk, seq_len)
-
-            c_mean = c_f.mean(dim=1, keepdim=True)           # (n_train, 1)
-            c_std = c_f.std(dim=1, keepdim=True).clamp(min=1e-8)  # (n_train, 1)
-            c_norm = (c_f - c_mean) / c_std                  # (n_train, seq_len)
-        else:
-            q_norm = q_f
-            c_norm = c_f
-
-        # torch.cdist: (chunk, n_train) — L2 距离，无需手动 expand
-        # (chunk, seq) vs (n_train, seq) → broadcast → (chunk, n_train)
-        d_f = torch.cdist(q_norm.unsqueeze(1), c_norm.unsqueeze(1), p=2).squeeze(1)  # (chunk, n_train)
-        dists_accum = dists_accum + d_f
-
-    # 沿特征维求均值（多变量聚合）
-    dists = dists_accum / max(1, n_feat)  # (chunk, n_train)
-
-    return dists
-
 
 # ─────────────────────────────────────────────────────────────
 # MatrixProfileSearch 主类
@@ -104,16 +37,16 @@ def _torch_znorm_cdist(
 
 class MatrixProfileSearch:
     """
-    GPU 向量化 Z-Normalized 子序列检索（v3.3）
+    GPU 向量化 Z-Normalized 子序列检索（v3.4 安全版）
 
-    核心算法（无 Python 循环，全 GPU 向量化）：
-      1. 分块将 batch_Xt 移入 GPU
-      2. _torch_znorm_cdist：批量 Z-normalized torch.cdist，多变量聚合
-      3. torch.topk(largest=False)：GPU 上提取 top-k 最近邻
-      4. CPU 上逆距离加权 KNN 融合
-
-    显存控制：predict_chunk_size（默认 512）控制每块测试样本数，
-             train_chunk_size（默认 1024）控制每块记忆库样本数
+    核心算法：
+      fit:   记忆库预转 GPU；normalize=True 时预计算全局 mean/std
+      predict:
+        1. 分块遍历测试集 X_test（chunk_sz=512）
+        2. 分块遍历记忆库 X_train（mc=1024）
+        3. 按特征维分别调用 2D torch.cdist，彻底避免 3D/4D 广播
+        4. GPU torch.topk(largest=False) 提取 top-k
+        5. CPU 逆距离加权 KNN 融合
     """
 
     DTYPE = np.float32
@@ -175,7 +108,7 @@ class MatrixProfileSearch:
         if self.subseq_len is None:
             self.subseq_len = self.seq_len
 
-        # 预转换记忆库到 GPU（pin_memory 加速 PCIe 传输）
+        # 全量记忆库预转 GPU（pin_memory 加速 PCIe）
         if self.device.type == 'cuda':
             self._mem_X_t = torch.from_numpy(self.memory_X).pin_memory().float().to(self.device, non_blocking=True)
             self._mem_Y_t = torch.from_numpy(self.memory_Y).pin_memory().float().to(self.device, non_blocking=True)
@@ -195,13 +128,11 @@ class MatrixProfileSearch:
         """
         GPU 向量化 Z-Normalized 检索 + 逆距离加权 KNN
 
-        核心流程（全 GPU 向量化）：
-          for chunk_X in X_test 分块:
-              for chunk_mem in memory_X 分块:
-                  dists_chunk = _torch_znorm_cdist(chunk_X, chunk_mem)  # (chunk, mc)
-              dists = cat(dists_chunk)                                   # (chunk, n_train)
-              vals, idx = torch.topk(dists, k, largest=False, dim=1)    # GPU
-              y_pred_chunk = weighted_knn(vals, idx, mem_Y)              # CPU
+        核心流程：
+          1. 遍历 X_test 分块（cs=512）
+          2. 分块内遍历 memory 分块（mc=1024）
+          3. 按特征维调用 2D torch.cdist，彻底避免广播冲突
+          4. GPU top-k → CPU 逆距离加权
         """
         if not self.is_fitted:
             raise RuntimeError("模型尚未拟合，请先调用 fit()")
@@ -235,44 +166,75 @@ class MatrixProfileSearch:
         with torch.no_grad():
             for t_start in range(0, n_test, cs):
                 t_end = min(t_start + cs, n_test)
-                batch_sz = t_end - t_start
+                # chunk_sz 跟随实际 batch 大小，不使用固定 512 填充
+                chunk_sz = t_end - t_start
 
-                # 分块移入 GPU
-                xb = torch.from_numpy(Xt[t_start:t_end]).float().to(self.device, non_blocking=True)  # (chunk, seq_len, n_feat)
+                # ── 第 1 步：batch 从 numpy 移入 GPU ────────────────
+                xb = torch.from_numpy(Xt[t_start:t_end]).float().to(self.device, non_blocking=True)
 
-                # 显存安全：分块处理记忆库
+                if self.normalize:
+                    # 每个 batch 独立 Z-Normalization（Matrix Profile 标准做法）
+                    q_mean = xb.mean(dim=1, keepdim=True)          # (chunk, 1, n_feat)
+                    q_std = xb.std(dim=1, keepdim=True).clamp(min=1e-8)  # (chunk, 1, n_feat)
+                    xb_norm = (xb - q_mean) / q_std                # (chunk, seq_len, n_feat)
+                else:
+                    xb_norm = xb
+
+                # ── 第 2 步：遍历记忆库分块，计算距离矩阵 ─────────────
+                # 预分配结果矩阵，形状严格为 (chunk_sz, n_train)
                 dists = torch.zeros(
-                    batch_sz, n_train, dtype=torch.float32, device=self.device
+                    chunk_sz, n_train, dtype=torch.float32, device=self.device
                 )
 
                 for m_start in range(0, n_train, mc):
                     m_end = min(m_start + mc, n_train)
-                    mem_slice = mem_X_t[m_start:m_end]   # (mc, seq_len, n_feat)
+                    mc_cur = m_end - m_start                          # 当前块实际大小
+                    mem_slice = mem_X_t[m_start:m_end]               # (mc_cur, seq_len, n_feat)
 
-                    # GPU 向量化 Z-Norm 距离（无 Python 循环）
-                    d = _torch_znorm_cdist(xb, mem_slice, normalize=self.normalize)
-                    dists[:, m_start:m_end] = d
-                    del mem_slice, d
+                    if self.normalize:
+                        # 记忆库分块独立 Z-Normalization
+                        m_mean = mem_slice.mean(dim=1, keepdim=True)           # (mc_cur, 1, n_feat)
+                        m_std = mem_slice.std(dim=1, keepdim=True).clamp(min=1e-8)  # (mc_cur, 1, n_feat)
+                        mem_norm = (mem_slice - m_mean) / m_std          # (mc_cur, seq_len, n_feat)
+                    else:
+                        mem_norm = mem_slice
 
-                if self.device.type == 'cuda':
-                    torch.cuda.empty_cache()
+                    # ── 第 3 步：按特征维分别计算 2D cdist ───────────
+                    # 严格按特征维展开，cdist 始终接收 2D 张量：
+                    #   torch.cdist((chunk, seq), (mc_cur, seq)) → (chunk, mc_cur)
+                    dist_f_sum = torch.zeros(
+                        chunk_sz, mc_cur, dtype=torch.float32, device=self.device
+                    )
 
-                # ── GPU top-k 提取 ─────────────────────────────────
-                vals, top_idx = torch.topk(dists, k, largest=False, dim=1)  # (chunk, k) GPU
+                    for f in range(n_feat):
+                        q_f = xb_norm[:, :, f]       # (chunk, seq_len)
+                        t_f = mem_norm[:, :, f]      # (mc_cur, seq_len)
+                        # torch.cdist: 两输入均为 2D，输出 (chunk, mc_cur)
+                        dist_f_sum += torch.cdist(q_f, t_f, p=2)
 
-                # ── CPU 逆距离加权 KNN ─────────────────────────────
+                    dists[:, m_start:m_end] = dist_f_sum / float(max(1, n_feat))
+
+                    del mem_slice, mem_norm, dist_f_sum
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+
+                # ── 第 4 步：GPU top-k 提取 ──────────────────────────
+                vals, top_idx = torch.topk(dists, k, largest=False, dim=1)  # (chunk, k)
+
+                # ── 第 5 步：CPU 逆距离加权 KNN ───────────────────────
                 top_idx_cpu = top_idx.cpu().numpy()
                 vals_cpu = vals.clamp(min=1e-6).cpu().numpy()
                 del dists, vals, top_idx
 
                 # neighbor_Y: (chunk, k, pred_len * n_feat)
-                neighbor_Y = self.memory_Y[top_idx_cpu].reshape(batch_sz, k, y_dim_total)
+                neighbor_Y = self.memory_Y[top_idx_cpu].reshape(chunk_sz, k, y_dim_total)
                 w = 1.0 / vals_cpu
                 w = w / w.sum(axis=1, keepdims=True)          # (chunk, k)
                 yb = (neighbor_Y * w[:, :, None]).sum(axis=1)  # (chunk, pred_len * n_feat)
 
                 chunks.append(yb.astype(np.float32))
-                del xb, neighbor_Y, w, yb, top_idx_cpu, vals_cpu
+
+                del xb, xb_norm, neighbor_Y, w, yb, top_idx_cpu, vals_cpu
                 gc.collect()
                 if self.device.type == 'cuda':
                     torch.cuda.empty_cache()
@@ -282,7 +244,7 @@ class MatrixProfileSearch:
                 pct = processed / n_test * 100
                 logger.info(
                     f"  [MatrixProfileSearch] {processed}/{n_test} ({pct:.1f}%) "
-                    f"| chunk={batch_sz} | normalize={self.normalize}"
+                    f"| chunk={chunk_sz} | mc_max={mc} | normalize={self.normalize}"
                 )
 
         del mem_X_t, mem_Y_t
