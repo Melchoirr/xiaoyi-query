@@ -88,8 +88,8 @@ class _RAGCore(nn.Module):
         """
         Args:
             q_enc: (batch, d_model) — 当前 Query 编码
-            k_enc: (n_train, d_model) — 全量记忆 Key（预编码，冻结）
-            v: (n_train, pred_len, n_feat) — 全量记忆 Value
+            k_enc: (n_keys, d_model) — 全量记忆 Key（预编码，冻结）
+            v: (n_keys, pred_len, n_feat) — 全量记忆 Value
 
         Returns:
             (batch, pred_len, n_feat) — Cross-Attention 预测
@@ -97,13 +97,14 @@ class _RAGCore(nn.Module):
         # Scaled dot-product attention
         attn_w = torch.softmax(
             (q_enc @ k_enc.T) / (self.d_model ** 0.5), dim=-1
-        )   # (batch, n_train)
+        )   # (batch, n_keys)
 
-        # 加权求和 values: (batch, n_train) @ (n_train, pred_len, n_feat)
-        y_pred = torch.einsum('bn,bnf->bf', attn_w, v)   # (batch, pred_len * n_feat)
+        # 安全：将 3D 的 v 展平为 2D，直接矩阵乘法加权
+        v_flat = v.reshape(v.shape[0], -1)               # (n_keys, pred_len * n_features)
+        y_pred = attn_w @ v_flat                         # (batch, pred_len * n_features)
 
         # MLP 投影
-        y_pred = self.out_proj(y_pred)   # (batch, pred_len * n_feat)
+        y_pred = self.out_proj(y_pred)                   # (batch, pred_len * n_features)
         return y_pred
 
 

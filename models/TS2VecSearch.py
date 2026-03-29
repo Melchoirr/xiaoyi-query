@@ -270,11 +270,13 @@ class TS2VecSearch:
 
         if _HAS_FAISS:
             d = self.hidden_dim
-            if self.device.type == 'cuda':
+            if self.device.type == 'cuda' and hasattr(faiss, 'StandardGpuResources'):
                 gpu_res = faiss.StandardGpuResources()
                 self.index = faiss.GpuIndexFlatL2(gpu_res, d)
+                logger.info("[TS2VecSearch] Using faiss GPU index.")
             else:
                 self.index = faiss.IndexFlatL2(d)
+                logger.info("[TS2VecSearch] Using faiss CPU index.")
             self.index.add(self.train_vectors)
             logger.info(f"[TS2VecSearch] faiss index built: {self.index.ntotal}")
         else:
