@@ -1,24 +1,19 @@
 """
-静态可视化模块 - 四段线对比波形图
+Static Visualization Module - Four-Segment Waveform Comparison
 
-v3.0 核心设计：
-四段线布局（从左到右时间顺序）：
+Academic layout (left to right in time order):
 
-  区域 A: Historical Lookback     [t=-seq_len .. -1]
-           模型检索到的最相似历史子序列 X_match（来自训练记忆库）
+  Region A: Historical Lookback    [t=-seq_len .. -1]
+             Most similar historical subsequence retrieved by the model
+  Region B: Historical Prediction  [t=-pred_len .. -1]
+             Ground-truth future following Region A (as reference baseline)
+  Region C: Test Input             [t=-seq_len .. -1]
+             Current test sample's input sequence
+  Region D: Pred vs Ground Truth    [t=0 .. pred_len-1]
+             Predicted vs actual future interval
 
-  区域 B: Historical Prediction   [t=-pred_len .. -1]
-           X_match 之后紧跟的真实 Y 序列（作为"预测参考基准"）
-
-  区域 C: Test Input (History)   [t=-seq_len .. -1]
-           当前测试样本的输入序列 X_test（历史真实）
-
-  区域 D: Pred vs True            [t=0 .. pred_len-1]
-           预测值 vs 真实值（未来区间）
-
-X 轴统一为时间偏移（0 为预测起点），所有数据均为原始物理尺度。
-
-布局：GridSpec (rows × cols)，右上角统一 Legend，标题含模型名及关键参数。
+X-axis: time offset (0 = prediction start), Y-axis: original physical scale.
+All labels use English-only academic nomenclature for Linux compatibility.
 """
 
 import os
@@ -27,10 +22,10 @@ import json
 import numpy as np
 from typing import Optional, Dict, Any, List
 
-# 软导入 matplotlib（venv 中可能未安装）
+# Soft import matplotlib (may not be installed in venv)
 try:
     import matplotlib
-    matplotlib.use('Agg')   # 非交互式后端
+    matplotlib.use('Agg')   # non-interactive backend
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     from matplotlib.patches import Patch
@@ -40,11 +35,10 @@ except ImportError:
     gridspec = None
     Patch = None
     _HAS_MATPLOTLIB = False
-    # 不 raise，用户会看到友好错误
 
 
 # ─────────────────────────────────────────────────────────────
-# ETT 特征名
+# ETT feature names
 # ─────────────────────────────────────────────────────────────
 
 ETT_FEATURE_NAMES = ["HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT"]
@@ -57,7 +51,7 @@ def _get_feature_label(feat_idx: int, n_features: int) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# 四段数据提取
+# Four-segment data extraction
 # ─────────────────────────────────────────────────────────────
 
 def _extract_4segments(
@@ -72,68 +66,58 @@ def _extract_4segments(
     best_match: Optional[Dict[str, np.ndarray]] = None
 ) -> Dict[str, np.ndarray]:
     """
-    从展平数组中提取四段波形
+    Extract four waveform segments from flattened arrays.
 
     Args:
-        history: shape (n_samples, seq_len * n_features) — 测试集历史输入（展平）
-        preds:   shape (n_samples, pred_len * n_features) — 预测值
-        trues:   shape (n_samples, pred_len * n_features) — 真实值
-        best_match: 可选，{'hist_match': np.ndarray, 'pred_match': np.ndarray}
-                    历史最相似匹配段及对应的真实后续
+        history: (n_samples, seq_len * n_features) — test set history, raw scale
+        preds:   (n_samples, pred_len * n_features) — predictions
+        trues:   (n_samples, pred_len * n_features) — ground truth
+        best_match: optional, {'hist_match': np.ndarray, 'pred_match': np.ndarray}
 
     Returns:
-        dict 含四段数据，均为 shape (N,) 的 1D 数组
+        dict of 1D arrays for each segment
     """
     def _get(data, idx, fidx, slen):
-        '''从展平数据中提取指定样本和特征列'''
         if data.ndim == 1:
             return data
         per_feat = data.shape[1] // n_features
         start = fidx * per_feat
         return data[idx, start:start + slen]
 
-    hist_len = seq_len * n_features // n_features
-    # 提取当前样本的特征列（展平为 seq_len）
-    seg_a_len = min(seq_len, seq_len)  # 历史回看段长度
-
-    seg_a = _get(history, sample_idx, feat_idx, seq_len)  # 历史回看
-    seg_c = _get(history, sample_idx, feat_idx, seq_len)  # 测试输入（与 seg_a 相同数据源）
+    seg_a = _get(history, sample_idx, feat_idx, seq_len)   # Historical Lookback
+    seg_c = _get(history, sample_idx, feat_idx, seq_len)   # Test Input (same source)
 
     seg_d_pred = _get(preds, sample_idx, feat_idx, pred_len)
     seg_d_true = _get(trues, sample_idx, feat_idx, pred_len)
 
-    # 区域 B（历史预测段）：若提供 best_match 则使用，否则用 seg_c 移位近似
+    # Region B (Historical Prediction)
     if best_match is not None and 'pred_match' in best_match:
-        match_pred = best_match['pred_match']  # shape (pred_len,)
+        match_pred = best_match['pred_match']
         if match_pred is not None and len(match_pred) >= pred_len:
             seg_b = match_pred[:pred_len]
         else:
             seg_b = np.zeros(pred_len)
     else:
-        # fallback：用 seg_a 后 pred_len 个点作为近似（无实际含义，仅作占位）
-        seg_b = seg_a[-pred_len:] if len(seg_a) >= pred_len else np.pad(seg_a, (pred_len - len(seg_a), 0), constant_values=0)
+        seg_b = seg_a[-pred_len:] if len(seg_a) >= pred_len \
+            else np.pad(seg_a, (pred_len - len(seg_a), 0), constant_values=0)
 
-    # 区域 A（历史匹配段）
+    # Region A (Historical Match)
     if best_match is not None and 'hist_match' in best_match:
         match_hist = best_match['hist_match']
         if match_hist is not None and len(match_hist) >= seq_len:
             seg_a = match_hist[:seq_len]
-        else:
-            seg_a = seg_a
-    else:
-        seg_a = seg_a  # 直接用测试集历史
 
     return {
-        'seg_a': seg_a.astype(np.float64),   # Historical Lookback
-        'seg_b': seg_b.astype(np.float64),   # Historical Prediction
-        'seg_c': seg_c.astype(np.float64),   # Test Input
+        'seg_a': seg_a.astype(np.float64),
+        'seg_b': seg_b.astype(np.float64),
+        'seg_c': seg_c.astype(np.float64),
         'seg_d_pred': seg_d_pred.astype(np.float64),
         'seg_d_true': seg_d_true.astype(np.float64),
     }
 
 
 # ─────────────────────────────────────────────────────────────
-# 单图绘制
+# Single subplot drawing
 # ─────────────────────────────────────────────────────────────
 
 def _draw_single_subplot(
@@ -152,56 +136,51 @@ def _draw_single_subplot(
     show_regions: bool = True
 ):
     """
-    在一个 ax 上绘制四段波形
+    Draw four-segment waveform on one axes.
 
-    四段 X 轴坐标（统一从左到右时间递增，0 = 预测起点）：
-      seg_a: [-seq_len, -1]       Historical Lookback（蓝灰）
-      seg_b: [-pred_len, -1]      Historical Prediction（橙黄）
-      seg_c: [-seq_len, -1]      Test Input / True History（蓝）
-      seg_d: [0, pred_len-1]     Pred vs True（红虚 vs 绿实）
+    X-axis coordinates (left to right, 0 = prediction start):
+      seg_a: [-seq_len, -1]    Historical Lookback (blue-gray)
+      seg_b: [-pred_len, -1]   Historical Prediction (orange)
+      seg_c: [-seq_len, -1]    Test Input (dark blue)
+      seg_d: [0, pred_len-1]   Pred vs True (red dashed vs green solid)
     """
-    # X 轴（时间偏移，0 为预测起点）
-    x_a = np.arange(-seq_len, 0)                           # [-seq_len, -1]
-    x_b = np.arange(-pred_len, 0)                          # [-pred_len, -1]
-    x_c = np.arange(-seq_len, 0)                           # [-seq_len, -1]
-    x_d = np.arange(0, pred_len)                           # [0, pred_len-1]
+    x_a = np.arange(-seq_len, 0)
+    x_b = np.arange(-pred_len, 0)
+    x_c = np.arange(-seq_len, 0)
+    x_d = np.arange(0, pred_len)
 
-    # 区域背景色（可选）
     if show_regions:
         ax.axvspan(-seq_len - 0.5, 0 - 0.5, alpha=0.04, color='gray', zorder=0)
 
-    # 区域 A：Historical Lookback（浅蓝灰）
+    # Region A: Historical Lookback
     ax.plot(x_a, seg_a, color='#7fb3d3', linewidth=1.8, alpha=0.85,
             label='A: Hist. Lookback', zorder=3)
 
-    # 区域 B：Historical Prediction（橙黄）
+    # Region B: Historical Prediction
     if len(x_b) == len(seg_b):
         ax.plot(x_b, seg_b, color='#f5b041', linewidth=1.8, alpha=0.85,
                 label='B: Hist. Pred', zorder=3)
 
-    # 区域 C：Test Input（深蓝）
+    # Region C: Test Input
     ax.plot(x_c, seg_c, color='#1f4e79', linewidth=2.2, alpha=0.9,
             label='C: Test Input', zorder=4)
 
-    # 区域 D：Pred vs True
+    # Region D: Pred vs True
     ax.plot(x_d, seg_d_true, color='#28a745', linewidth=2.2,
-            label='D: True (Future)', zorder=5)
+            label='D: Ground Truth', zorder=5)
     ax.plot(x_d, seg_d_pred, color='#c00000', linewidth=2.2,
             linestyle='--', marker='o', markersize=2.5,
             label='D: Prediction', zorder=6)
 
-    # X=0 分隔线（虚线）
+    # X=0 separator
     ax.axvline(x=0, color='#404040', linestyle=':', linewidth=1.5, zorder=2)
-
-    # Y 轴 zeroline
     ax.axhline(y=0, color='lightgray', linewidth=0.8, zorder=1)
 
     ax.set_xlim(-seq_len - 1, pred_len + 1)
-    ax.set_xlabel('时间偏移（0 = 预测起点）', fontsize=8)
+    ax.set_xlabel('Time Offset (0 = Prediction Start)', fontsize=8)
     ax.tick_params(labelsize=7)
     ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
 
-    # 子图标题
     ax.set_title(
         model_name + " | sample=" + str(sample_idx)
         + " | " + feat_label
@@ -211,7 +190,7 @@ def _draw_single_subplot(
 
 
 # ─────────────────────────────────────────────────────────────
-# 主绘图函数
+# Main plotting function
 # ─────────────────────────────────────────────────────────────
 
 def plot_comparison_samples(
@@ -231,45 +210,41 @@ def plot_comparison_samples(
     dpi: int = 120
 ):
     """
-    生成四段线对比网格图
+    Generate four-segment waveform comparison grid.
 
     Args:
-        history: shape (n, seq_len * n_features) 展平数组，原始物理尺度
-        preds:   shape (n, pred_len * n_features)
-        trues:   shape (n, pred_len * n_features)
-        seq_len, pred_len, n_features: 序列参数
-        model_name: 模型名称（用于标题）
-        params: 参数字典（用于标题展示）
-        save_path: PNG 保存路径（默认不保存）
-        n_samples: 网格图中子图数量（默认 9）
-        figsize: 总图尺寸（默认 (14, 10)）
-        feat_idx: 绘制哪个特征维度（默认 -1 = Target）
-        best_matches: 可选，最相似匹配数据（由模型提供）
-        dpi: PNG 分辨率（默认 120）
+        history: (n, seq_len * n_features) flattened, raw physical scale
+        preds:   (n, pred_len * n_features)
+        trues:   (n, pred_len * n_features)
+        seq_len, pred_len, n_features: sequence parameters
+        model_name: model name (used in title)
+        params:  parameter dict (used in title)
+        save_path: PNG save path (default: not saved)
+        n_samples: number of subplots (default 9)
+        figsize: total figure size (default (14, 10))
+        feat_idx: which feature dimension to plot (default -1 = Target)
+        best_matches: optional, most-similar-match data (provided by model)
+        dpi: PNG resolution (default 120)
     """
     if not _HAS_MATPLOTLIB:
         print(
-            "[plotting] WARNING: matplotlib 未安装，无法生成可视化图片。\n"
-            "请运行以下命令安装:\n"
-            f"  /e/Code/Pycharm/xiaoyi-query/.venv/Scripts/python.exe -m pip install matplotlib\n"
-            "或（系统 Python）:\n"
-            "  python -m pip install matplotlib\n"
-            "跳过绘图，不影响实验运行。"
+            "[plotting] WARNING: matplotlib not installed. "
+            "Install with: pip install matplotlib\n"
+            "Skipping plot. Experiments will continue normally."
         )
         return
-   
+
     if feat_idx < 0:
         feat_idx = n_features - 1
     feat_idx = min(feat_idx, n_features - 1)
 
-    # 转为 numpy 数组
     history = np.asarray(history)
     preds = np.asarray(preds)
     trues = np.asarray(trues)
 
     n_available = min(history.shape[0], preds.shape[0], trues.shape[0])
     if n_available == 0:
-        _plot_placeholder(save_path, "无有效数据", figsize)
+        _plot_placeholder(save_path, "No valid data", figsize)
         return
 
     n_samples = min(n_samples, n_available)
@@ -278,7 +253,6 @@ def plot_comparison_samples(
 
     feat_label = _get_feature_label(feat_idx, n_features)
 
-    # 随机采样（固定 seed 保证可复现）
     rng = np.random.RandomState(42)
     sample_indices = rng.choice(n_available, size=n_samples, replace=False).tolist()
 
@@ -315,7 +289,7 @@ def plot_comparison_samples(
             model_name, idx, feat_label, params or {}
         )
 
-    # ── 总图标题 ────────────────────────────────────────────
+    # ── Figure title ───────────────────────────────────────────
     if params:
         revin_t = params.get('revin_type', 'none')
         topk = params.get('top_k', '-')
@@ -326,19 +300,19 @@ def plot_comparison_samples(
             + " revin=" + revin_t
             + " top_k=" + str(topk)
             + " word_size=" + str(wsize)
-            + " | " + feat_label + " | 原始物理尺度"
+            + " | " + feat_label + " | Raw Physical Scale"
         )
     else:
         title = model_name + " | seq=" + str(seq_len) + " pred=" + str(pred_len)
 
     fig.suptitle(title, fontsize=11, fontweight='bold', y=0.98)
 
-    # ── 统一 Legend（放在右下角之外）────────────────────────
+    # ── Unified Legend ────────────────────────────────────────
     handles = [
         Patch(facecolor='#7fb3d3', label='A: Hist. Lookback'),
         Patch(facecolor='#f5b041', label='B: Hist. Prediction'),
         Patch(facecolor='#1f4e79', label='C: Test Input'),
-        Patch(facecolor='#28a745', label='D: True (Future)'),
+        Patch(facecolor='#28a745', label='D: Ground Truth'),
         Patch(facecolor='#c00000', label='D: Prediction (red --)'),
     ]
     fig.legend(
@@ -363,7 +337,7 @@ def plot_comparison_samples(
 
 
 def _plot_placeholder(save_path: Optional[str], message: str, figsize: tuple):
-    """当数据无效时生成占位图"""
+    """Generate placeholder when data is invalid"""
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.text(0.5, 0.5, message, ha='center', va='center',
             fontsize=14, transform=ax.transAxes, color='gray')
@@ -381,15 +355,16 @@ def plot_summary_bar(
     figsize: tuple = (10, 5)
 ):
     """
-    Generate bar chart from summary_metrics.csv
+    Generate bar chart from summary_metrics.csv (English-only, Linux-safe).
 
     Args:
         summary_csv: path to summary_metrics.csv
-        metric: metric to plot (MAE / MSE / RMSE / MAPE)
+        metric: metric to plot (MAE / MSE / RMSE / MAPE / RSE / CORR)
         save_path: PNG save path
+        figsize: figure size
     """
     if not _HAS_MATPLOTLIB:
-        print("[plotting] matplotlib 未安装，跳过 summary 柱状图。")
+        print("[plotting] matplotlib not installed, skipping summary bar chart.")
         return
 
     import pandas as pd
@@ -408,7 +383,6 @@ def plot_summary_bar(
         print("[plotting] no successful experiments found")
         return
 
-    # 构造标签：model + revin_type
     df_success['label'] = (
         df_success['model'] + ' (' + df_success['revin_type'].astype(str) + ')'
     )
@@ -428,9 +402,9 @@ def plot_summary_bar(
             '%.4f' % val, ha='center', va='bottom', fontsize=8
         )
 
-    ax.set_title(metric + ' 对比（越低越好）', fontsize=12, fontweight='bold')
+    ax.set_title(f'{metric} Comparison (Lower is Better)', fontsize=12, fontweight='bold')
     ax.set_ylabel(metric, fontsize=10)
-    ax.set_xlabel('模型 (归一化类型)', fontsize=10)
+    ax.set_xlabel('Model (RevIN Type)', fontsize=10)
     plt.xticks(rotation=30, ha='right', fontsize=8)
     ax.grid(True, alpha=0.3, axis='y', linestyle='--')
     plt.tight_layout()
@@ -444,7 +418,7 @@ def plot_summary_bar(
 
 
 if __name__ == '__main__':
-    # 单元测试：生成假数据的占位图
+    # Unit test with fake data
     n = 20
     seq = 96
     pred = 48
