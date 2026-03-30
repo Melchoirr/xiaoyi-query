@@ -136,24 +136,24 @@ def _draw_single_subplot(
     if show_regions:
         ax.axvspan(-seq_len - 0.5, 0 - 0.5, alpha=0.04, color='gray', zorder=0)
 
-    # Region A: Historical Lookback
+    # Region A: Historical Lookback (去雾化)
     ax.plot(x_a, seg_a, color='#7fb3d3', linewidth=1.8, alpha=0.85,
-            label='A: Hist. Lookback', zorder=3)
+            marker='None', label='A: Hist. Lookback', zorder=3)
 
-    # Region B: Historical Prediction
+    # Region B: Historical Prediction (去雾化)
     if len(x_b) == len(seg_b):
         ax.plot(x_b, seg_b, color='#f5b041', linewidth=1.8, alpha=0.85,
-                label='B: Hist. Pred', zorder=3)
+                marker='None', label='B: Hist. Pred', zorder=3)
 
-    # Region C: Test Input
+    # Region C: Test Input (去雾化)
     ax.plot(x_c, seg_c, color='#1f4e79', linewidth=2.2, alpha=0.9,
-            label='C: Test Input', zorder=4)
+            marker='None', label='C: Test Input', zorder=4)
 
-    # Region D: Pred vs True (去雾化：移除 marker，仅保留平滑实线)
+    # Region D: Pred vs True (去雾化)
     ax.plot(x_d, seg_d_true, color='#28a745', linewidth=2.2,
-            label='D: Ground Truth', zorder=5)
+            marker='None', label='D: Ground Truth', zorder=5)
     ax.plot(x_d, seg_d_pred, color='#c00000', linewidth=2.2,
-            linestyle='--', label='D: Prediction', zorder=6)
+            linestyle='--', marker='None', label='D: Prediction', zorder=6)
 
     # X=0 separator
     ax.axvline(x=0, color='#404040', linestyle=':', linewidth=1.5, zorder=2)
@@ -748,32 +748,33 @@ def plot_retrieval_fading(
             weight = topk_weights[i, j]
             alpha = 0.15 + 0.7 * weight  # 权重 0 时 alpha=0.15, 权重 1 时 alpha=0.85
 
-            # 绘制历史匹配
+            # 绘制历史匹配（去雾化）
             hist_seq = topk_histories[i, j, :, feat_idx] if topk_histories.ndim == 4 else topk_histories[i, j, :]
             ax.plot(x_past, hist_seq, color=base_color, alpha=alpha, linewidth=1.2,
-                   label=f'Match {j+1} (w={weight:.2f})' if i == 0 else '')
+                   marker='None', label=f'Match {j+1} (w={weight:.2f})' if i == 0 else '')
 
-            # 绘制未来匹配
+            # 绘制未来匹配（去雾化）
             if topk_futures.ndim == 4:
                 fut_seq = topk_futures[i, j, :, feat_idx]
             else:
                 fut_seq = topk_futures[i, j, :]
-            ax.plot(x_future, fut_seq, color=base_color, alpha=alpha, linewidth=1.2)
+            ax.plot(x_future, fut_seq, color=base_color, alpha=alpha, linewidth=1.2,
+                   marker='None')
 
-        # ── 绘制当前样本的 Test Input（深蓝色粗实线）────────────
+        # ── 绘制当前样本的 Test Input（深蓝色粗实线，去雾化）──────
         test_input = x_test_feat[i] if x_test_feat.ndim == 1 else x_test_feat[i, :seq_len]
         ax.plot(x_past, test_input, color='#1f4e79', linewidth=2.5, alpha=0.9,
-               label='Test Input', zorder=5)
+               marker='None', label='Test Input', zorder=5)
 
-        # ── 绘制 Ground Truth（深绿色粗实线）────────────────────
+        # ── 绘制 Ground Truth（深绿色粗实线，去雾化）────────────
         gt_future = trues[i] if trues.ndim == 1 else trues[i, :]
         ax.plot(x_future, gt_future, color='#27ae60', linewidth=2.5, alpha=0.9,
-               label='Ground Truth', zorder=6)
+               marker='None', label='Ground Truth', zorder=6)
 
-        # ── 绘制 Final Prediction（红色虚线，去雾化）─────────────────
+        # ── 绘制 Final Prediction（红色虚线，去雾化）─────────────
         pred_future = preds[i] if preds.ndim == 1 else preds[i, :]
         ax.plot(x_future, pred_future, color='#c0392b', linewidth=2.5, alpha=0.9,
-               linestyle='--', label='Prediction', zorder=7)
+               linestyle='--', marker='None', label='Prediction', zorder=7)
 
         # ── X=0 分隔线 ────────────────────────────────────────────
         ax.axvline(x=0, color='#404040', linestyle=':', linewidth=1.5, zorder=2)
@@ -888,14 +889,14 @@ def plot_cross_model_comparison(
     dpi: int = 300
 ):
     """
-    跨模型对比大图 - Conference-Level Analysis (v4.1 新增)
+    跨模型对比大图 - Conference-Level Analysis (v4.1 新增/修复)
 
     功能：
-    1. 遍历 run_dir 下所有实验子文件夹
+    1. 遍历 run_dir 下所有以 ETTm1_ 开头的实验子文件夹
     2. 读取各自的 preds.npy，以及统一的 X_test.npy 和 trues.npy
-    3. 绘制一张大图：左侧 Test Input（黑色），右侧 Ground Truth（黑色粗虚线）
-    4. 将所有模型的预测结果画在右侧，使用高对比度颜色
-    5. 保存为 run_dir/cross_model_comparison_sample{sample_id}.png
+    3. 绘制一张大图：左侧 Test Input（黑色实线），右侧 Ground Truth（黑色粗虚线）
+    4. 将所有模型的预测结果画在右侧，使用高对比度颜色（tab: 系列）
+    5. 保存为 run_dir/cross_model_sample{sample_id}.png
 
     Args:
         run_dir: 实验运行目录
@@ -909,11 +910,14 @@ def plot_cross_model_comparison(
         print("[plotting] matplotlib not installed, skipping cross-model comparison.")
         return
 
-    # 扫描所有实验目录
+    # 扫描所有以 ETTm1_ 开头的实验目录
     exp_dirs = []
     for item in os.listdir(run_dir):
         exp_path = os.path.join(run_dir, item)
         if not os.path.isdir(exp_path):
+            continue
+        # 只扫描以 ETTm1_ 开头的文件夹
+        if not item.startswith('ETTm1_'):
             continue
         preds_path = os.path.join(exp_path, 'preds.npy')
         if os.path.exists(preds_path):
@@ -1020,18 +1024,18 @@ def plot_cross_model_comparison(
             pred_fut = preds[sample_id, :] if preds.ndim == 2 else preds[sample_id]
         pred_futures.append(pred_fut)
 
-    # 高对比度颜色列表（确保视觉区分度）
+    # 高对比度颜色列表（matplotlib tab: 系列）
     colors = [
-        '#e74c3c',  # 红色
-        '#3498db',  # 蓝色
-        '#2ecc71',  # 绿色
-        '#9b59b6',  # 紫色
-        '#f39c12',  # 橙色
-        '#1abc9c',  # 青色
-        '#34495e',  # 深灰
-        '#e91e63',  # 粉色
-        '#00bcd4',  # 亮青
-        '#ff5722',  # 深橙
+        'tab:red',    # 红色
+        'tab:blue',   # 蓝色
+        'tab:green',  # 绿色
+        'tab:orange', # 橙色
+        'tab:purple', # 紫色
+        'tab:brown',  # 棕色
+        'tab:pink',   # 粉色
+        'tab:gray',   # 灰色
+        'tab:olive',  # 橄榄色
+        'tab:cyan',   # 青色
     ]
 
     # 创建图形
@@ -1041,21 +1045,21 @@ def plot_cross_model_comparison(
     x_past = np.arange(-seq_len, 0)
     x_future = np.arange(0, pred_len)
 
-    # ── 左侧：Test Input（黑色实线）─────────────────────────────────
+    # ── 左侧：Test Input（黑色实线，去糊）─────────────────────────────
     ax.plot(x_past, test_input, color='#2c3e50', linewidth=3.0, alpha=1.0,
-           label='Test Input (History)', zorder=10)
+           marker='None', label='Test Input (History)', zorder=10)
 
-    # ── 右侧：Ground Truth（黑色粗虚线）──────────────────────────────
+    # ── 右侧：Ground Truth（黑色粗虚线，去糊）──────────────────────────
     ax.plot(x_future, gt_future, color='#000000', linewidth=3.5, alpha=1.0,
-           linestyle='--', label='Ground Truth', zorder=9)
+           linestyle='--', marker='None', label='Ground Truth', zorder=9)
 
-    # ── 绘制各模型预测（高对比度颜色）────────────────────────────────
+    # ── 绘制各模型预测（高对比度颜色，去糊）────────────────────────────
     for i, (pred_fut, model_name) in enumerate(zip(pred_futures, model_names)):
         color = colors[i % len(colors)]
         # 简化模型名称显示
         short_name = model_name.replace('Search', '').replace('_', ' ')
         ax.plot(x_future, pred_fut, color=color, linewidth=2.0, alpha=0.85,
-               label=short_name, zorder=5 + i)
+               marker='None', label=short_name, zorder=5 + i)
 
     # ── X=0 分隔线 ──────────────────────────────────────────────────
     ax.axvline(x=0, color='#7f8c8d', linestyle='-', linewidth=2, zorder=8)
@@ -1073,7 +1077,7 @@ def plot_cross_model_comparison(
 
     # ── 标题 ────────────────────────────────────────────────────────
     ax.set_title(
-        f'Cross-Model Comparison | Sample #{sample_id} | Feature: {feat_label}\n'
+        f'Cross-Model Prediction Comparison (Sample {sample_id})\n'
         f'Left: Test Input (Black) | Right: Ground Truth (Black Dashed) & Predictions (Colors)',
         fontsize=13, fontweight='bold'
     )
@@ -1086,7 +1090,7 @@ def plot_cross_model_comparison(
 
     # ── 保存 ────────────────────────────────────────────────────────
     if save_path is None:
-        save_path = os.path.join(run_dir, f'cross_model_comparison_sample{sample_id}.png')
+        save_path = os.path.join(run_dir, f'cross_model_sample{sample_id}.png')
 
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
     fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white', edgecolor='none')

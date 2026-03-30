@@ -230,46 +230,6 @@ def inverse_revin(
     return Y_norm.astype(np.float32)
 
 
-def _denormalize_retrieval_meta(
-    meta: Dict[str, Any],
-    revin_stats: Dict[str, np.ndarray],
-    revin_type: str
-) -> Dict[str, np.ndarray]:
-    """
-    将溯源证据从归一化空间反归一化到物理尺度 (v4.1 新增)
-
-    Args:
-        meta: 溯源证据字典，包含 topk_histories, topk_futures, topk_weights 等
-        revin_stats: apply_revin 返回的统计量
-        revin_type: 归一化类型
-
-    Returns:
-        新的字典，topk_histories 和 topk_futures 已反归一化
-    """
-    if revin_type == 'none':
-        return meta
-
-    result = dict(meta)  # 复制原始数据
-
-    # 反归一化 topk_histories
-    topk_hist = meta.get('topk_histories')
-    if topk_hist is not None and topk_hist.size > 0:
-        n_samples, k, seq_len, n_feat = topk_hist.shape
-        topk_hist_3d = topk_hist.reshape(n_samples * k, seq_len, n_feat)
-        topk_hist_denorm = inverse_revin(topk_hist_3d, revin_stats, revin_type)
-        result['topk_histories'] = topk_hist_denorm.reshape(n_samples, k, seq_len, n_feat)
-
-    # 反归一化 topk_futures
-    topk_fut = meta.get('topk_futures')
-    if topk_fut is not None and topk_fut.size > 0:
-        n_samples, k, pred_len, n_feat = topk_fut.shape
-        topk_fut_3d = topk_fut.reshape(n_samples * k, pred_len, n_feat)
-        topk_fut_denorm = inverse_revin(topk_fut_3d, revin_stats, revin_type)
-        result['topk_futures'] = topk_fut_denorm.reshape(n_samples, k, pred_len, n_feat)
-
-    return result
-
-
 # ============================================================
 # 核心计算逻辑（v4.0: 单次实验，输出溯源证据）
 # ============================================================
@@ -408,6 +368,10 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         if hasattr(model, 'get_retrieval_meta'):
             log.info(f"[{model_name}] Model supports retrieval evidence, capturing metadata...")
             Y_pred_norm, retrieval_meta = model.get_retrieval_meta(X_test_norm)
+            # 先保存归一化版本的 npz
+            if retrieval_meta is not None:
+                np.savez_compressed(os.path.join(exp_dir, 'retrieval_meta.npz'), **retrieval_meta)
+                log.info(f"[{model_name}] Raw retrieval meta saved: hist={retrieval_meta.get('topk_histories', np.array([])).shape}")
         else:
             Y_pred_norm = model.predict(X_test_norm)
 
@@ -441,20 +405,47 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         np.save(os.path.join(exp_dir, 'trues.npy'), Y_test_inv)
         np.save(os.path.join(exp_dir, 'X_test.npy'), history_preview_raw.reshape(MAX_PREVIEW, -1))
 
-        # 保存溯源证据（如果有）- 反归一化到物理尺度
-        if retrieval_meta is not None:
-            log.info(f"[{model_name}] Denormalizing retrieval meta to physical scale...")
-            retrieval_meta_phys = _denormalize_retrieval_meta(
-                retrieval_meta, revin_stats_test, revin_type
-            )
-            np.savez_compressed(
-                os.path.join(exp_dir, 'retrieval_meta.npz'),
-                **retrieval_meta_phys
-            )
-            log.info(f"[{model_name}] Retrieval meta saved (physical scale): "
-                     f"topk_hist={retrieval_meta_phys.get('topk_histories', np.array([])).shape}, "
-                     f"topk_fut={retrieval_meta_phys.get('topk_futures', np.array([])).shape}, "
-                     f"weights={retrieval_meta_phys.get('topk_weights', np.array([])).shape}")
+        # ── 补丁一：修复检索元数据反归一化广播错误 ─────────────────────────
+        # 关键问题：topk_hist 被展开为 (n_meta * k_meta)，而 revin_stats 是 (n_test, ...)
+        # 解决方案：截取前 n_meta 个统计量，在 axis=0 上重复 k_meta 次对齐
+        meta_file = os.path.join(exp_dir, 'retrieval_meta.npz')
+        if os.path.exists(meta_file):
+            try:
+                log.info(f"[{model_name}] Denormalizing retrieval meta to physical scale...")
+                meta = np.load(meta_file)
+                topk_hist = meta['topk_histories']  # shape: (n_meta, k, seq_len, n_feat)
+                topk_futu = meta['topk_futures']    # shape: (n_meta, k, pred_len, n_feat)
+                weights = meta['topk_weights']       # shape: (n_meta, k)
+
+                n_meta, k_meta, s_len, f_len = topk_hist.shape
+                p_len = topk_futu.shape[2]
+
+                # 关键修复：截取前 n_meta 个统计量，并在 axis=0 上重复 k_meta 次
+                sliced_stats = {}
+                for key, val in revin_stats_test.items():
+                    v_slice = val[:n_meta]  # 取前 n_meta 个测试样本的统计量 (n_meta, 1, ...)
+                    sliced_stats[key] = np.repeat(v_slice, k_meta, axis=0)  # 展开对齐为 (n_meta * k_meta, 1, ...)
+
+                # 执行反归一化（先 reshape 为 3D）
+                hist_3d = topk_hist.reshape(-1, s_len, f_len)  # (n_meta * k, seq_len, n_feat)
+                futu_3d = topk_futu.reshape(-1, p_len, f_len)   # (n_meta * k, pred_len, n_feat)
+
+                hist_inv = inverse_revin(hist_3d, sliced_stats, revin_type)
+                futu_inv = inverse_revin(futu_3d, sliced_stats, revin_type)
+
+                # 恢复物理量纲（inverse_transform）
+                hist_inv_flat = hist_inv.reshape(-1, f_len)
+                futu_inv_flat = futu_inv.reshape(-1, f_len)
+
+                hist_inv_phys = test_set.inverse_transform(hist_inv_flat).reshape(n_meta, k_meta, s_len, f_len).astype(np.float32)
+                futu_inv_phys = test_set.inverse_transform(futu_inv_flat).reshape(n_meta, k_meta, p_len, f_len).astype(np.float32)
+
+                np.savez(meta_file, topk_histories=hist_inv_phys, topk_futures=futu_inv_phys, topk_weights=weights)
+                log.info(f"[{model_name}] Retrieval meta denormalized: hist={hist_inv_phys.shape}, fut={futu_inv_phys.shape}")
+            except Exception as e:
+                import traceback
+                log.error(f"[{model_name}] Meta denorm failed: {e}")
+                log.debug(traceback.format_exc())
 
         del test_set, Y_pred_flat, Y_test_flat
         gc.collect()
