@@ -233,7 +233,15 @@ class TS2VecSearch:
         criterion = _ContrastiveLoss(temperature=self.tau)
 
         dataset = TensorDataset(torch.from_numpy(X))
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=True)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=True,
+        )
 
         self.encoder.train()
         for epoch in range(self.epochs):

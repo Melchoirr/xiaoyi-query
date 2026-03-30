@@ -280,8 +280,13 @@ class RAGSearch:
 
         dataset = TensorDataset(torch.from_numpy(X))
         loader = DataLoader(
-            dataset, batch_size=self.batch_size,
-            shuffle=True, drop_last=True
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=True,
         )
 
         # 预计算训练集的 Key 编码（每 epoch 重新编码一次，避免重复计算）

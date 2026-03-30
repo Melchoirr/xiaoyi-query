@@ -77,16 +77,23 @@ logger = logging.getLogger(__name__)
 RUN_DIR = RESULTS_DIR  # fallback
 
 
-def setup_run_dir() -> str:
+def setup_run_dir(args) -> str:
     """
-    生成带时间戳的运行目录，并将全局 RUN_DIR 指向它。
-    所有 experiment_log.json / summary_metrics.csv / {exp_id}/ 均写入此目录。
+    生成运行目录。
+
+    - 若 args.run_dir 不为空：直接使用用户指定路径（Shell 脚本统一管控时间戳）
+    - 若为空：fallback 到按时间戳自动生成（单次快速运行场景）
     """
     global RUN_DIR
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    RUN_DIR = os.path.join(PROJECT_ROOT, 'results', f'run_{ts}')
-    os.makedirs(RUN_DIR, exist_ok=True)
-    os.makedirs(os.path.join(RUN_DIR, 'logs'), exist_ok=True)
+    if args is not None and getattr(args, 'run_dir', None):
+        RUN_DIR = os.path.abspath(args.run_dir)
+        os.makedirs(RUN_DIR, exist_ok=True)
+        os.makedirs(os.path.join(RUN_DIR, 'logs'), exist_ok=True)
+    else:
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        RUN_DIR = os.path.join(PROJECT_ROOT, 'results', f'run_{ts}')
+        os.makedirs(RUN_DIR, exist_ok=True)
+        os.makedirs(os.path.join(RUN_DIR, 'logs'), exist_ok=True)
     return RUN_DIR
 
 
@@ -510,12 +517,12 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_default(param: str) -> Any:
-    """获取参数默认值（v3.4: V100 32G 大释放）"""
+    """获取参数默认值（v3.5: V100 32G / 16核 CPU 极限释放）"""
     defaults = {
-        # ── KNN 基线 ─────────────────────────────────────────
+        # ── KNN 基线（chunk 爆炸式提升）────────────────────────
         'top_k': 5,
         'weighted': True,
-        'predict_chunk_size': 2048,
+        'predict_chunk_size': 4096,        # PatternSearch: 2048 → 4096
         # ── LSH ───────────────────────────────────────────────
         'n_hash_funcs': 16,
         'n_tables': 4,
@@ -527,20 +534,20 @@ def _get_default(param: str) -> Any:
         'alphabet_size': 8,
         'epsilon_threshold': 1.0,
         'bucket_top_k': 8,
-        # ── DTWSearch（v3.4: chunk 512 → 1024）────────────────
+        # ── DTWSearch（chunk 512 → 4096）───────────────────────
         'dtw_radius': 5,
-        # ── MatrixProfileSearch（v3.4: chunk 512 → 4096）───────
+        # ── MatrixProfileSearch（chunk 512 → 8192）──────────────
         'subsequence_length': None,
         'normalize': True,
-        'train_chunk_size': 2048,
-        # ── TS2VecSearch（v3.4: epochs 10→50, batch 128→256）─
+        'train_chunk_size': 4096,
+        # ── TS2VecSearch（batch 256→1024, epochs 50→100）───────
         'hidden_dim': 64,
-        'epochs': 50,
-        'batch_size': 256,
+        'epochs': 100,
+        'batch_size': 1024,
         'lr': 1e-3,
         'temperature': 0.1,
-        # ── RAGSearch（v3.4: d_model 32→128, heads 4→8, e 10→50, bs 128→256）
-        'd_model': 128,
+        # ── RAGSearch（d_model 128→256, heads 8, batch 1024, e 100）
+        'd_model': 256,
         'n_heads': 8,
         'weight_decay': 1e-4,
     }
@@ -626,9 +633,9 @@ class ExperimentRunner:
     def __init__(self, args):
         self.args = args
         self.results = []
-        self.run_dir = setup_run_dir()          # ← 时间戳隔离
+        self.run_dir = setup_run_dir(args)      # ← args 传入，--run_dir 优先
         global RUN_DIR
-        RUN_DIR = self.run_dir                  # ← 注入全局
+        RUN_DIR = self.run_dir
         self._memory_check()
 
     def _memory_check(self) -> bool:
@@ -692,23 +699,23 @@ class ExperimentRunner:
                     'weighted': self.args.sax_weighted,
                 })
 
-            # DTWSearch（v3.4: chunk 512 → 1024）
+            # DTWSearch（v3.5: chunk 512 → 4096）
             elif m == 'DTWSearch':
                 cfg.update({
                     'top_k': self.args.top_k,
                     'dtw_radius': getattr(self.args, 'dtw_radius', 5),
                     'weighted': self.args.weighted,
-                    'predict_chunk_size': getattr(self.args, 'predict_chunk_size', 1024),
+                    'predict_chunk_size': getattr(self.args, 'predict_chunk_size', 4096),
                 })
 
-            # MatrixProfileSearch（v3.4: chunk 512 → 4096）
+            # MatrixProfileSearch（v3.5: chunk 512 → 8192）
             elif m == 'MatrixProfileSearch':
                 cfg.update({
                     'top_k': self.args.top_k,
                     'subsequence_length': getattr(self.args, 'subsequence_length', None),
                     'normalize': getattr(self.args, 'mp_normalize', True),
-                    'predict_chunk_size': getattr(self.args, 'mp_chunk_size', 4096),
-                    'train_chunk_size': getattr(self.args, 'mp_train_chunk_size', 2048),
+                    'predict_chunk_size': getattr(self.args, 'mp_chunk_size', 8192),
+                    'train_chunk_size': getattr(self.args, 'mp_train_chunk_size', 4096),
                 })
 
             # TS2VecSearch（v3.4: epochs 10→50, batch 128→256）
@@ -805,7 +812,7 @@ class ExperimentRunner:
 
     def _run_parallel(self, configs: List[Dict], total: int):
         """并行执行，单个失败不中断"""
-        n_workers = min(self.args.n_workers, total, 4)
+        n_workers = min(self.args.n_workers, total, 16)
         logger.info(f"Parallel execution: {n_workers} workers\n")
 
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
@@ -1066,6 +1073,9 @@ def parse_args():
                        help='RAG weight decay, default 1e-4')
 
     # 执行参数
+    parser.add_argument('--run_dir', type=str, default=None,
+                       help='Run output directory (timestamped by shell script). '
+                            'If set, results go here instead of auto-generated run_YYYYMMDD_HHMMSS/')
     parser.add_argument('--parallel', action='store_true',
                        help='Enable parallel execution (auto-degrades if memory > 85%%)')
     parser.add_argument('--n_workers', type=int, default=4,
