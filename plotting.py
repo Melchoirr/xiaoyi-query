@@ -1,18 +1,16 @@
 """
-Static Visualization Module - Four-Segment Waveform Comparison
+Static Visualization Module - Four-Segment Waveform Comparison + Conference-Level Analysis
+
+v4.0 大道至简重构版新增：
+1. plot_super_comparison_matrix: 全局热力图/柱状图网格对比
+2. plot_retrieval_fading: 历史匹配溯源图（权重透明度绑定）
 
 Academic layout (left to right in time order):
-
   Region A: Historical Lookback    [t=-seq_len .. -1]
-             Most similar historical subsequence retrieved by the model
   Region B: Historical Prediction  [t=-pred_len .. -1]
-             Ground-truth future following Region A (as reference baseline)
   Region C: Test Input             [t=-seq_len .. -1]
-             Current test sample's input sequence
   Region D: Pred vs Ground Truth    [t=0 .. pred_len-1]
-             Predicted vs actual future interval
 
-X-axis: time offset (0 = prediction start), Y-axis: original physical scale.
 All labels use English-only academic nomenclature for Linux compatibility.
 """
 
@@ -21,6 +19,7 @@ import sys
 import json
 import numpy as np
 from typing import Optional, Dict, Any, List
+from pathlib import Path
 
 # Soft import matplotlib (may not be installed in venv)
 try:
@@ -67,15 +66,6 @@ def _extract_4segments(
 ) -> Dict[str, np.ndarray]:
     """
     Extract four waveform segments from flattened arrays.
-
-    Args:
-        history: (n_samples, seq_len * n_features) — test set history, raw scale
-        preds:   (n_samples, pred_len * n_features) — predictions
-        trues:   (n_samples, pred_len * n_features) — ground truth
-        best_match: optional, {'hist_match': np.ndarray, 'pred_match': np.ndarray}
-
-    Returns:
-        dict of 1D arrays for each segment
     """
     def _get(data, idx, fidx, slen):
         if data.ndim == 1:
@@ -137,12 +127,6 @@ def _draw_single_subplot(
 ):
     """
     Draw four-segment waveform on one axes.
-
-    X-axis coordinates (left to right, 0 = prediction start):
-      seg_a: [-seq_len, -1]    Historical Lookback (blue-gray)
-      seg_b: [-pred_len, -1]   Historical Prediction (orange)
-      seg_c: [-seq_len, -1]    Test Input (dark blue)
-      seg_d: [0, pred_len-1]   Pred vs True (red dashed vs green solid)
     """
     x_a = np.arange(-seq_len, 0)
     x_b = np.arange(-pred_len, 0)
@@ -211,20 +195,6 @@ def plot_comparison_samples(
 ):
     """
     Generate four-segment waveform comparison grid.
-
-    Args:
-        history: (n, seq_len * n_features) flattened, raw physical scale
-        preds:   (n, pred_len * n_features)
-        trues:   (n, pred_len * n_features)
-        seq_len, pred_len, n_features: sequence parameters
-        model_name: model name (used in title)
-        params:  parameter dict (used in title)
-        save_path: PNG save path (default: not saved)
-        n_samples: number of subplots (default 9)
-        figsize: total figure size (default (14, 10))
-        feat_idx: which feature dimension to plot (default -1 = Target)
-        best_matches: optional, most-similar-match data (provided by model)
-        dpi: PNG resolution (default 120)
     """
     if not _HAS_MATPLOTLIB:
         print(
@@ -356,12 +326,6 @@ def plot_summary_bar(
 ):
     """
     Generate bar chart from summary_metrics.csv (English-only, Linux-safe).
-
-    Args:
-        summary_csv: path to summary_metrics.csv
-        metric: metric to plot (MAE / MSE / RMSE / MAPE / RSE / CORR)
-        save_path: PNG save path
-        figsize: figure size
     """
     if not _HAS_MATPLOTLIB:
         print("[plotting] matplotlib not installed, skipping summary bar chart.")
@@ -417,8 +381,512 @@ def plot_summary_bar(
     plt.close(fig)
 
 
+# ═══════════════════════════════════════════════════════════════
+# v4.0 新增：顶会级分析大图
+# ═══════════════════════════════════════════════════════════════
+
+def plot_super_comparison_matrix(
+    run_dir: str,
+    metric: str = 'MAE',
+    save_path: Optional[str] = None,
+    figsize: tuple = (20, 12),
+    dpi: int = 150
+):
+    """
+    绘制全局对比矩阵热力图/柱状图 - Conference-Level Analysis
+
+    功能：
+    1. 读取 run_dir/summary_metrics.csv
+    2. 纵轴：7 个算法名称（PatternSearch, RAGSearch 等）
+    3. 横轴：不同的超参组合（如 seq96_pred96_k5, seq192_pred96 等）
+    4. 颜色深浅代表 MAE/MSE/RMSE 等指标的大小
+    5. 支持 Heatmap 和 Grouped Bar Chart 两种模式
+
+    Args:
+        run_dir: 实验运行目录
+        metric: 要对比的指标（MAE / MSE / RMSE / MAPE）
+        save_path: 保存路径（默认 run_dir/super_comparison_matrix.png）
+        figsize: 图形大小
+        dpi: 分辨率
+    """
+    if not _HAS_MATPLOTLIB:
+        print("[plotting] matplotlib not installed, skipping super comparison matrix.")
+        return
+
+    import pandas as pd
+
+    csv_path = os.path.join(run_dir, 'summary_metrics.csv')
+    if not os.path.exists(csv_path):
+        print(f"[plotting] summary_metrics.csv not found: {csv_path}")
+        return
+
+    df = pd.read_csv(csv_path)
+
+    # 过滤成功的实验
+    df_success = df[df['status'] == 'success'].copy()
+    if df_success.empty:
+        print("[plotting] No successful experiments found in CSV.")
+        return
+
+    if metric not in df_success.columns:
+        print(f"[plotting] Metric '{metric}' not found in CSV columns.")
+        return
+
+    # 构建超参组合标签
+    def make_param_label(row):
+        """生成唯一的超参组合标签"""
+        parts = [f"s{row['seq_len']}_p{row['pred_len']}"]
+        # 根据模型添加特定参数
+        if row['model'] in ['PatternSearch', 'DTWSearch', 'MatrixProfileSearch', 'TS2VecSearch']:
+            topk = row.get('top_k', 5)
+            if pd.notna(topk):
+                parts.append(f"k{int(topk)}")
+        elif row['model'] == 'LSHSearch':
+            h = row.get('n_hash_funcs', 16)
+            t = row.get('n_tables', 4)
+            if pd.notna(h) and pd.notna(t):
+                parts.append(f"h{int(h)}t{int(t)}")
+        elif row['model'] == 'SAXSearch':
+            w = row.get('word_size', 8)
+            a = row.get('alphabet_size', 8)
+            if pd.notna(w) and pd.notna(a):
+                parts.append(f"w{int(w)}a{int(a)}")
+        elif row['model'] == 'RAGSearch':
+            dm = row.get('d_model', 256)
+            nh = row.get('n_heads', 8)
+            if pd.notna(dm) and pd.notna(nh):
+                parts.append(f"dm{int(dm)}h{int(nh)}")
+        elif row['model'] == 'TS2VecSearch':
+            hd = row.get('hidden_dim', 64)
+            e = row.get('epochs', 100)
+            if pd.notna(hd) and pd.notna(e):
+                parts.append(f"hd{int(hd)}e{int(e)}")
+        return "_".join(parts)
+
+    df_success['param_label'] = df_success.apply(make_param_label, axis=1)
+
+    # 获取所有模型和参数组合
+    models = df_success['model'].unique().tolist()
+    param_labels = df_success['param_label'].unique().tolist()
+
+    # 按参数标签长度和字典序排序
+    param_labels = sorted(param_labels, key=lambda x: (len(x), x))
+
+    if len(models) == 0 or len(param_labels) == 0:
+        print("[plotting] No valid data for comparison matrix.")
+        return
+
+    # 创建数据矩阵
+    n_models = len(models)
+    n_params = len(param_labels)
+
+    # 构建透视表
+    pivot = df_success.pivot_table(
+        values=metric,
+        index='model',
+        columns='param_label',
+        aggfunc='first'
+    )
+
+    # 选择存在的模型
+    pivot = pivot.reindex(index=models, columns=param_labels, fill_value=np.nan)
+
+    # 计算均值用于排序
+    model_order = pivot.mean(axis=1).sort_values().index.tolist()
+    pivot = pivot.reindex(model_order)
+
+    # ── 绘制图形 ────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=figsize, gridspec_kw={'width_ratios': [1.2, 1]})
+
+    # 左图：热力图
+    ax1 = axes[0]
+
+    # 过滤掉全为 NaN 的行和列
+    valid_cols = pivot.columns[pivot.notna().any()].tolist()
+    valid_rows = pivot.index[pivot.notna().any(axis=1)].tolist()
+
+    if len(valid_rows) == 0 or len(valid_cols) == 0:
+        print("[plotting] No valid data for heatmap.")
+        plt.close(fig)
+        return
+
+    data_matrix = pivot.loc[valid_rows, valid_cols].values.astype(float)
+
+    # 绘制热力图
+    cmap = 'RdYlGn_r'  # 红=差(大), 绿=好(小)
+    im = ax1.imshow(data_matrix, aspect='auto', cmap=cmap, vmin=np.nanmin(data_matrix), vmax=np.nanmax(data_matrix))
+
+    # 设置刻度
+    ax1.set_xticks(np.arange(len(valid_cols)))
+    ax1.set_yticks(np.arange(len(valid_rows)))
+    ax1.set_xticklabels(valid_cols, rotation=45, ha='right', fontsize=8)
+    ax1.set_yticklabels(valid_rows, fontsize=9)
+
+    # 添加数值标注
+    for i in range(len(valid_rows)):
+        for j in range(len(valid_cols)):
+            val = data_matrix[i, j]
+            if not np.isnan(val):
+                text_color = 'white' if val > (np.nanmax(data_matrix) + np.nanmin(data_matrix)) / 2 else 'black'
+                ax1.text(j, i, f'{val:.3f}', ha='center', va='center', fontsize=7, color=text_color)
+
+    ax1.set_title(f'{metric} Heatmap by Model & Parameters\n(Lower is Better)', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Parameter Configuration', fontsize=10)
+    ax1.set_ylabel('Model', fontsize=10)
+
+    # 颜色条
+    cbar = plt.colorbar(im, ax=ax1, shrink=0.8)
+    cbar.set_label(metric, fontsize=10)
+
+    # 右图：分组柱状图（Top-10 最佳配置）
+    ax2 = axes[1]
+
+    # 获取最佳配置
+    df_sorted = df_success.sort_values(metric).head(10)
+
+    colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(df_sorted)))
+    bars = ax2.barh(
+        np.arange(len(df_sorted)),
+        df_sorted[metric].values,
+        color=colors,
+        edgecolor='gray',
+        linewidth=0.5
+    )
+
+    # 添加数值标签
+    for bar, val in zip(bars, df_sorted[metric].values):
+        ax2.text(val + 0.001, bar.get_y() + bar.get_height() / 2,
+                f'{val:.4f}', va='center', fontsize=8)
+
+    # 设置刻度
+    ax2.set_yticks(np.arange(len(df_sorted)))
+    labels = [f"{row['model']}\n({row['param_label']})"
+              for _, row in df_sorted.iterrows()]
+    ax2.set_yticklabels(labels, fontsize=7)
+
+    ax2.set_xlabel(metric, fontsize=10)
+    ax2.set_title(f'Top-10 Best Configurations\n(Sorted by {metric})', fontsize=12, fontweight='bold')
+    ax2.invert_yaxis()  # 最好的在上面
+    ax2.grid(True, alpha=0.3, axis='x', linestyle='--')
+
+    # 整体标题
+    fig.suptitle(
+        f'Time-Series Forecasting: Comprehensive Model Comparison\n'
+        f'Dataset: {df_success["exp_id"].iloc[0].split("_")[0] if len(df_success) > 0 else "Unknown"} | '
+        f'Total Experiments: {len(df_success)} | Metric: {metric}',
+        fontsize=14, fontweight='bold', y=0.98
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    if save_path is None:
+        save_path = os.path.join(run_dir, 'super_comparison_matrix.png')
+
+    os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+    fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white', edgecolor='none')
+    print(f"[plotting] Super comparison matrix saved: {save_path}")
+
+    plt.close(fig)
+
+    # 同时生成单独的柱状图摘要
+    _plot_model_ranking_bar(df_success, metric, run_dir)
+
+
+def _plot_model_ranking_bar(df_success: 'pd.DataFrame', metric: str, run_dir: str):
+    """绘制按模型分组的柱状图排名"""
+    if not _HAS_MATPLOTLIB:
+        return
+
+    # 计算每个模型的最佳成绩
+    model_best = df_success.groupby('model')[metric].min().sort_values()
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    n_models = len(model_best)
+    colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, n_models))
+
+    bars = ax.bar(
+        range(n_models),
+        model_best.values,
+        color=colors,
+        edgecolor='gray',
+        linewidth=1
+    )
+
+    # 添加数值标签
+    for bar, val in zip(bars, model_best.values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.001,
+               f'{val:.4f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+    ax.set_xticks(range(n_models))
+    ax.set_xticklabels(model_best.index, rotation=30, ha='right', fontsize=10)
+    ax.set_ylabel(f'Best {metric} (Lower is Better)', fontsize=12)
+    ax.set_title(f'Model Ranking by Best {metric}\n(Darker Red = Worse, Green = Better)', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+    # 标注冠军
+    best_model = model_best.index[0]
+    ax.annotate('CHAMPION', xy=(0, model_best.values[0]),
+               xytext=(0.5, model_best.values[0] * 1.1),
+               fontsize=10, fontweight='bold', color='green',
+               arrowprops=dict(arrowstyle='->', color='green'))
+
+    plt.tight_layout()
+
+    save_path = os.path.join(run_dir, 'model_ranking_bar.png')
+    fig.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='white')
+    print(f"[plotting] Model ranking bar saved: {save_path}")
+    plt.close(fig)
+
+
+def plot_retrieval_fading(
+    exp_dir: str,
+    n_samples: int = 5,
+    feat_idx: int = -1,
+    save_path: Optional[str] = None,
+    figsize: tuple = (18, 12),
+    dpi: int = 150
+):
+    """
+    绘制历史匹配溯源图 - Conference-Level Analysis
+
+    核心视觉：
+    1. X 轴分为两段：过去 ([-seq_len, 0]) 和 未来 ([0, pred_len])
+    2. 用较粗的实线画出当前样本的 Test Input（过去）和 Ground Truth（未来）
+    3. 将匹配到的 K 条历史 topk_histories 和 topk_futures 画在同一张图上
+    4. 线条颜色设为绿色，透明度绑定为对应的 topk_weights
+    5. 叠加红色的 Final Prediction 虚线
+
+    Args:
+        exp_dir: 实验目录（包含 retrieval_meta.npz, preds.npy, trues.npy）
+        n_samples: 绘制的样本数量（默认 5）
+        feat_idx: 绘制哪个特征维度（默认 -1 = 目标特征）
+        save_path: 保存路径
+        figsize: 图形大小
+        dpi: 分辨率
+    """
+    if not _HAS_MATPLOTLIB:
+        print("[plotting] matplotlib not installed, skipping retrieval fading plot.")
+        return
+
+    # 加载数据
+    meta_path = os.path.join(exp_dir, 'retrieval_meta.npz')
+    preds_path = os.path.join(exp_dir, 'preds.npy')
+    trues_path = os.path.join(exp_dir, 'trues.npy')
+    x_test_path = os.path.join(exp_dir, 'X_test.npy')
+
+    if not os.path.exists(meta_path):
+        print(f"[plotting] retrieval_meta.npz not found: {meta_path}")
+        print("[plotting] This feature requires retrieval models (PatternSearch, DTWSearch, TS2VecSearch).")
+        return
+
+    try:
+        meta = np.load(meta_path, allow_pickle=True)
+        preds = np.load(preds_path)
+        trues = np.load(trues_path)
+        x_test = np.load(x_test_path)
+    except Exception as e:
+        print(f"[plotting] Failed to load data: {e}")
+        return
+
+    # 提取元数据
+    topk_histories = meta['topk_histories']  # (n_samples, k, seq_len, n_feat)
+    topk_futures = meta['topk_futures']      # (n_samples, k, pred_len, n_feat)
+    topk_weights = meta['topk_weights']       # (n_samples, k)
+    seq_len = int(meta.get('seq_len', 96))
+    pred_len = int(meta.get('pred_len', 96))
+    n_features = int(meta.get('n_features', 7))
+    model_name = str(meta.get('model_name', 'Unknown'))
+
+    if feat_idx < 0:
+        feat_idx = n_features - 1
+    feat_idx = min(feat_idx, n_features - 1)
+
+    feat_label = _get_feature_label(feat_idx, n_features)
+
+    # 限制样本数量
+    n_samples = min(n_samples, topk_histories.shape[0], preds.shape[0])
+
+    # 调整 preds 和 trues 形状
+    if preds.ndim == 3:
+        preds = preds[:, :, feat_idx]  # (n_test, pred_len)
+    if trues.ndim == 3:
+        trues = trues[:, :, feat_idx]  # (n_test, pred_len)
+
+    # 调整 x_test 形状
+    if x_test.ndim == 2:
+        per_feat = x_test.shape[1] // n_features
+        x_test_feat = x_test[:, feat_idx * per_feat:(feat_idx + 1) * per_feat]
+        if per_feat > seq_len:
+            x_test_feat = x_test_feat[:, :seq_len]
+        elif per_feat < seq_len:
+            x_test_feat = np.pad(x_test_feat, ((0, 0), (0, seq_len - per_feat)), mode='edge')
+    else:
+        x_test_feat = x_test[:, :seq_len]
+
+    # 颜色映射（绿色系，权重越高越深）
+    base_color = '#2ecc71'  # 基础绿色
+
+    # 创建图形
+    n_cols = 1
+    n_rows = n_samples
+
+    fig = plt.figure(figsize=(figsize[0], figsize[1] * n_samples / 3))
+    gs = gridspec.GridSpec(n_rows, 1, figure=fig, hspace=0.4)
+
+    for i in range(n_samples):
+        ax = fig.add_subplot(gs[i, 0])
+
+        k = topk_histories.shape[1]  # top_k 值
+
+        # X 轴坐标
+        x_past = np.arange(-seq_len, 0)
+        x_future = np.arange(0, pred_len)
+        x_total = np.arange(-seq_len, pred_len)
+
+        # ── 绘制匹配的历史序列（绿色，透明度=权重）──────────────
+        for j in range(k):
+            weight = topk_weights[i, j]
+            alpha = 0.15 + 0.7 * weight  # 权重 0 时 alpha=0.15, 权重 1 时 alpha=0.85
+
+            # 绘制历史匹配
+            hist_seq = topk_histories[i, j, :, feat_idx] if topk_histories.ndim == 4 else topk_histories[i, j, :]
+            ax.plot(x_past, hist_seq, color=base_color, alpha=alpha, linewidth=1.2,
+                   label=f'Match {j+1} (w={weight:.2f})' if i == 0 else '')
+
+            # 绘制未来匹配
+            if topk_futures.ndim == 4:
+                fut_seq = topk_futures[i, j, :, feat_idx]
+            else:
+                fut_seq = topk_futures[i, j, :]
+            ax.plot(x_future, fut_seq, color=base_color, alpha=alpha, linewidth=1.2)
+
+        # ── 绘制当前样本的 Test Input（深蓝色粗实线）────────────
+        test_input = x_test_feat[i] if x_test_feat.ndim == 1 else x_test_feat[i, :seq_len]
+        ax.plot(x_past, test_input, color='#1f4e79', linewidth=2.5, alpha=0.9,
+               label='Test Input', zorder=5)
+
+        # ── 绘制 Ground Truth（深绿色粗实线）────────────────────
+        gt_future = trues[i] if trues.ndim == 1 else trues[i, :]
+        ax.plot(x_future, gt_future, color='#27ae60', linewidth=2.5, alpha=0.9,
+               label='Ground Truth', zorder=6)
+
+        # ── 绘制 Final Prediction（红色虚线）─────────────────────
+        pred_future = preds[i] if preds.ndim == 1 else preds[i, :]
+        ax.plot(x_future, pred_future, color='#c0392b', linewidth=2.5, alpha=0.9,
+               linestyle='--', marker='o', markersize=3,
+               label='Prediction', zorder=7)
+
+        # ── X=0 分隔线 ────────────────────────────────────────────
+        ax.axvline(x=0, color='#404040', linestyle=':', linewidth=1.5, zorder=2)
+
+        # ── 区域填充 ──────────────────────────────────────────────
+        ax.axvspan(-seq_len - 0.5, -0.5, alpha=0.05, color='blue', zorder=0)
+        ax.axvspan(-0.5, pred_len - 0.5, alpha=0.05, color='green', zorder=0)
+
+        # ── 设置坐标轴 ────────────────────────────────────────────
+        ax.set_xlim(-seq_len - 1, pred_len + 1)
+        ax.set_xlabel('Time Offset (0 = Prediction Start)', fontsize=10)
+        ax.set_ylabel(feat_label, fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.5)
+
+        # ── 标题 ──────────────────────────────────────────────────
+        best_idx = np.argmax(topk_weights[i])
+        best_weight = topk_weights[i, best_idx]
+        ax.set_title(
+            f'Sample {i} | Model: {model_name} | '
+            f'Top-{k} Retrieval | Best Match: #{best_idx+1} (w={best_weight:.3f})',
+            fontsize=11, fontweight='bold'
+        )
+
+        # ── 图例（只在第一个子图显示）─────────────────────────────
+        if i == 0:
+            ax.legend(loc='upper left', fontsize=8, framealpha=0.9)
+
+    # ── 整体标题 ────────────────────────────────────────────────
+    fig.suptitle(
+        f'Retrieval Evidence Analysis: {model_name}\n'
+        f'Top-K Historical Matches with Weight-Based Transparency\n'
+        f'(Greener = Higher Weight, More Transparent = Lower Weight)',
+        fontsize=14, fontweight='bold', y=0.99
+    )
+
+    # 添加说明文字
+    fig.text(0.5, 0.01,
+            'Green Lines: Historical Matches (alpha = attention weight) | '
+            'Blue Line: Test Input | '
+            'Green Solid: Ground Truth | '
+            'Red Dashed: Prediction',
+            ha='center', fontsize=10, style='italic',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.96])
+
+    if save_path is None:
+        save_path = os.path.join(exp_dir, 'retrieval_analysis.png')
+
+    os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+    fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white', edgecolor='none')
+    print(f"[plotting] Retrieval fading plot saved: {save_path}")
+
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 批量绘图工具（供 Shell 脚本调用）
+# ═══════════════════════════════════════════════════════════════
+
+def generate_all_plots(run_dir: str):
+    """
+    生成所有分析图表
+
+    调用方式：
+        python -c "from plotting import generate_all_plots; generate_all_plots('./results/run_001')"
+
+    Args:
+        run_dir: 实验运行目录
+    """
+    print(f"[plotting] Generating all plots for: {run_dir}")
+
+    # 1. 生成超级对比矩阵
+    try:
+        plot_super_comparison_matrix(run_dir, metric='MAE')
+    except Exception as e:
+        print(f"[plotting] Failed to generate super comparison matrix: {e}")
+
+    # 2. 生成模型排名柱状图
+    try:
+        import pandas as pd
+        csv_path = os.path.join(run_dir, 'summary_metrics.csv')
+        if os.path.exists(csv_path):
+            df = pd.read_csv(csv_path)
+            df_success = df[df['status'] == 'success']
+            _plot_model_ranking_bar(df_success, 'MAE', run_dir)
+    except Exception as e:
+        print(f"[plotting] Failed to generate model ranking: {e}")
+
+    # 3. 遍历所有实验目录，生成溯源图
+    try:
+        for exp_id in os.listdir(run_dir):
+            exp_path = os.path.join(run_dir, exp_id)
+            if os.path.isdir(exp_path) and os.path.exists(os.path.join(exp_path, 'retrieval_meta.npz')):
+                try:
+                    plot_retrieval_fading(exp_path, n_samples=5)
+                except Exception as e:
+                    print(f"[plotting] Failed to generate retrieval plot for {exp_id}: {e}")
+    except Exception as e:
+        print(f"[plotting] Failed to scan experiment directories: {e}")
+
+    print("[plotting] All plots generation completed.")
+
+
+# ═══════════════════════════════════════════════════════════════
+# 单元测试
+# ═══════════════════════════════════════════════════════════════
+
 if __name__ == '__main__':
-    # Unit test with fake data
+    # 基础单元测试
     n = 20
     seq = 96
     pred = 48
@@ -444,4 +912,29 @@ if __name__ == '__main__':
         n_samples=9,
         feat_idx=nf - 1
     )
-    print("Test OK")
+
+    # 测试溯源图（生成假数据）
+    meta_fake = {
+        'topk_histories': np.random.randn(5, 5, 96, 7).astype(np.float32),
+        'topk_futures': np.random.randn(5, 5, 48, 7).astype(np.float32),
+        'topk_weights': np.random.rand(5, 5).astype(np.float32),
+        'topk_weights': np.abs(np.random.rand(5, 5).astype(np.float32)),
+    }
+    # 归一化权重
+    meta_fake['topk_weights'] = meta_fake['topk_weights'] / meta_fake['topk_weights'].sum(axis=1, keepdims=True)
+    meta_fake['seq_len'] = 96
+    meta_fake['pred_len'] = 48
+    meta_fake['n_features'] = 7
+    meta_fake['model_name'] = 'PatternSearch'
+
+    np.savez(os.path.join(out_dir, 'retrieval_meta.npz'), **meta_fake)
+    np.save(os.path.join(out_dir, 'preds.npy'), preds_fake[:10])
+    np.save(os.path.join(out_dir, 'trues.npy'), trues_fake[:10])
+    np.save(os.path.join(out_dir, 'X_test.npy'), history_fake[:10])
+
+    try:
+        plot_retrieval_fading(out_dir, n_samples=3, save_path=os.path.join(out_dir, 'test_retrieval.png'))
+    except Exception as e:
+        print(f"Retrieval plot test skipped: {e}")
+
+    print("All unit tests completed.")

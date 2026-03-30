@@ -1,4 +1,4 @@
-# 时序预测基线系统 (v3.5)
+# 时序预测基线系统 (v4.0 大道至简重构版)
 
 七种检索算法，基于记忆库 / 向量索引 / 深度学习的时序预测框架。
 
@@ -7,10 +7,21 @@
 | PatternSearch | 精确 | 欧氏距离 KNN，GPU 加速 |
 | LSHSearch | 近似 | 局部敏感哈希，uint64 打包 |
 | SAXSearch | 模糊 | PAA 降维 + NearestNeighbors |
-| DTWSearch | 弹性对齐 | GPU Sakoe-Chiba 累积 DP（v3.2） |
-| MatrixProfileSearch | 精确子序列 | **GPU 向量化 Z-Norm cdist**（v3.4） |
+| DTWSearch | 弹性对齐 | GPU Sakoe-Chiba 累积 DP |
+| MatrixProfileSearch | 精确子序列 | **GPU 向量化 Z-Norm cdist** |
 | TS2VecSearch | 深度表示 | Dilated CNN 对比学习 + faiss |
-| RAGSearch | 端到端 | Siamese Cross-Attention（v3.2） |
+| RAGSearch | 端到端 | Siamese Cross-Attention |
+
+## 核心变更 (v4.0 大道至简重构)
+
+本次重构遵循"大道至简"的设计理念：
+
+1. **Python 端纯粹执行器**：删除所有参数网格展开逻辑（ExperimentRunner, _expand_configs），argparse 简化为标量输入
+2. **Shell 端智能调度**：Shell 脚本全权负责参数组合生成和并行调度，case 语句为每个算法编写独立的超参循环
+3. **溯源证据输出**：检索模型（PatternSearch, DTWSearch, TS2VecSearch）新增 `get_retrieval_meta()` 方法，输出溯源证据
+4. **顶会级可视化**：新增两张顶级分析大图
+   - `plot_super_comparison_matrix`: 全局热力图/柱状图网格对比
+   - `plot_retrieval_fading`: 历史匹配溯源图（权重透明度绑定）
 
 ## 安装
 
@@ -25,155 +36,142 @@ pip install tslearn stumpy faiss-cpu   # 进一步加速对应模型
 ## 快速使用
 
 ```bash
-# 单模型快速运行（自动生成 run_YYYYMMDD_HHMMSS/）
-python run.py --model MatrixProfileSearch --seq_len 96 --pred_len 48 --top_k 5
+# 完整参数扫描（Shell 脚本智能调度）
+./scripts/run_experiments.sh --models all --seq-lens 96 --pred-lens 96 --revin-types dual --parallel --use-gpu
 
-# 参数扫描（Shell 脚本，自动时间戳隔离 + 智能路由）
-bash scripts/run_experiments.sh --models all --seq-lens 96,192 --pred-lens 96 --revin-types dual --parallel --use-gpu
+# 快速验证安装（单次运行）
+python run.py --model PatternSearch --seq_len 96 --pred_len 96 --run_dir ./results/run_001
 
-# 指定输出目录（覆盖自动时间戳，用于调度系统对接）
-python run.py --model all --run_dir ./results/my_sweep_001
-
-# 参数说明
-# --model: PatternSearch / LSHSearch / SAXSearch / DTWSearch /
-#          MatrixProfileSearch / TS2VecSearch / RAGSearch / all
-# --seq_len: 96 / 192 / 336 / 720（TSLib 标准）
-# --pred_len: 48 / 96 / 192 / 336 / 720
-# --revin_type: none / temporal / feature / dual
-# --run_dir: 输出目录（Shell 脚本统一管理，不在 Python 内生成时间戳）
+# 自定义实验
+python run.py --model PatternSearch --seq_len 96 --pred_len 96 --top_k 5 --weighted true --run_dir ./results/run_001
 ```
 
-## 各模型专属参数（v3.5 默认值）
-
-```bash
-# PatternSearch / DTWSearch / MatrixProfileSearch — chunk 爆炸式提升
-python run.py --model PatternSearch     --top_k 5 --weighted True
-python run.py --model DTWSearch         --top_k 5 --dtw_radius 5 --predict_chunk_size 4096
-python run.py --model MatrixProfileSearch --top_k 5 --mp_chunk_size 8192
-
-# TS2VecSearch — batch 1024, epochs 100, DataLoader num_workers=8
-python run.py --model TS2VecSearch --hidden_dim 64 --ts2vec_epochs 100 --ts2vec_batch_size 1024
-
-# RAGSearch — d_model=256, heads=8, batch=1024, epochs=100
-python run.py --model RAGSearch --rag_d_model 256 --rag_n_heads 8 --rag_epochs 100
-```
-
-## 输出结构（v3.5 Run-Level 时间戳隔离）
+## v4.0 架构设计
 
 ```
-results/
-└── run_20260325_143052/          # Shell 脚本生成，所有实验共享
-    ├── experiment_log.json
-    ├── summary_metrics.csv        # 所有实验汇总
-    ├── summary_MAE_bar.png       # MAE 柱状图
-    ├── logs/
-    │   ├── PatternSearch_seq96_pred96_k5_Rd.log
-    │   └── RAGSearch_seq96_pred96_k5_Rd.log
-    └── ETTm1_PatternSearch_seq96_pred96_k5_Rd/
-        ├── params.json
-        ├── metrics.json
-        ├── preds.npy             # 预测值（原始物理尺度）
-        ├── trues.npy
-        ├── X_test.npy
-        └── visualization.png       # 四段线对比图
-```
-
-## 算法对比
-
-| 模型 | 精度 | 复杂度 | 关键特性 |
-|------|------|--------|---------|
-| PatternSearch | 精确 | O(n) | torch.cdist GPU 加速，逆距离加权，chunk=4096 |
-| LSHSearch | 近似 | O(1) | 随机投影哈希，两阶段重排 |
-| SAXSearch | 模糊 | O(n) | PAA 降维，模糊匹配 |
-| DTWSearch | 弹性对齐 | O(chunk·n·m·r) | GPU Sakoe-Chiba 累积 DP，chunk=4096（v3.5） |
-| **MatrixProfileSearch** | **精确子序列** | **O(chunk·n·m)** | **GPU Z-Norm 2D cdist，chunk=8192，V100 ~10s（v3.4）** |
-| TS2VecSearch | 深度表示 | O(n) | TCN 对比学习，DataLoader workers=8，batch=1024，epochs=100 |
-| RAGSearch | 端到端 | O(n) | Siamese Cross-Attention，d_model=256，batch=1024，epochs=100 |
-
-## Shell 脚本智能路由（v3.5）
-
-`run_experiments.sh` 采用 `case` 路由，每个模型专属参数网格：
-
-```bash
-# PatternSearch / LSHSearch / SAXSearch / DTWSearch / TS2VecSearch：
-#   遍历 top_k、revin_type、seq_len、pred_len
-
-# RAGSearch（无 top_k 循环，节约 N×k 次无意义调用）：
-#   仅遍历 seq_len、pred_len、revin_type（top_k 固定为默认值）
-
-# 示例：仅扫描 RAGSearch
-bash scripts/run_experiments.sh \
-    --models RAGSearch \
-    --seq-lens 96,192,336 \
-    --pred-lens 96,192 \
-    --revin-types dual,temporal \
-    --parallel --use-gpu
-```
-
-## 项目结构
-
-```
-.
-├── run.py                      # 统一入口（--run_dir 支持、RevIN、实验持久化）
-├── plotting.py                 # 四段线对比图 + MAE 柱状图（全英文，Linux 安全）
-├── models/
-│   ├── PatternSearch.py         # 欧氏 KNN（chunk=4096）
-│   ├── LSHSearch.py            # LSH
-│   ├── SAXSearch.py            # SAX
-│   ├── DTWSearch.py            # DTW Sakoe-Chiba GPU DP（chunk=4096）
-│   ├── MatrixProfileSearch.py  # GPU Z-Norm 2D cdist（chunk=8192）
-│   ├── TS2VecSearch.py         # TCN 对比学习（DataLoader workers=8）
-│   └── RAGSearch.py            # Siamese Cross-Attention（d_model=256）
-├── data_provider/
-│   └── data_loader.py          # TSLib 数据加载，float32
-├── dashboard/
-│   └── app.py                  # Streamlit 交互式探查
-├── scripts/
-│   └── run_experiments.sh      # 智能路由参数扫描（v3.5）
-└── results/
-    └── run_YYYYMMDD_HHMMSS/    # Run-Level 时间戳隔离（v3.5）
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Shell 调度层 (run_experiments.sh)            │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  case 语句独立循环：                                          │  │
+│  │    - PatternSearch: top_k × weighted                        │  │
+│  │    - DTWSearch: top_k × dtw_radius                          │  │
+│  │    - RAGSearch: d_model × n_heads × epochs                  │  │
+│  │  后台任务 (&) + wait 并发控制                                 │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│                              ▼                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    Python 执行层 (run.py)                    │  │
+│  │  单进单出：每次调用执行单一实验                               │  │
+│  │  - 训练 → 推理 → 计算指标 → 保存结果                        │  │
+│  │  - 追加到 summary_metrics.csv                               │  │
+│  │  - 检索模型：额外保存 retrieval_meta.npz                     │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                     │
+│                              ▼                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                  可视化层 (plotting.py)                      │  │
+│  │  - 实验结束：自动绘制单实验波形对比图                         │  │
+│  │  - Shell 结束：绘制超级对比矩阵 + 溯源图                     │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 核心模块复用
 
 ```python
-from run import run_single_experiment, ExperimentRunner
+# 单次实验（Python API）
+from run import run_single_experiment
 
-# 单独运行（自动生成 run_YYYYMMDD_HHMMSS/）
 result = run_single_experiment({
-    'model_name': 'MatrixProfileSearch',
+    'model_name': 'PatternSearch',
     'seq_len': 96,
     'pred_len': 48,
     'top_k': 5,
-    'normalize': True,
-    'revin_type': 'temporal',
+    'weighted': True,
+    'revin_type': 'dual',
+    'run_dir': './results/run_001',
 })
 print(result['metrics'])
 
-# 指定输出目录
-runner = ExperimentRunner(args)  # args.run_dir 控制输出位置
-runner.run()
-
-# 独立绘图
-from plotting import plot_comparison_samples, plot_summary_bar
-plot_comparison_samples(
-    history=np.load('results/{run_id}/{exp_id}/X_test.npy'),
-    preds=np.load('results/{run_id}/{exp_id}/preds.npy'),
-    trues=np.load('results/{run_id}/{exp_id}/trues.npy'),
-    seq_len=96, pred_len=48, n_features=7,
-    model_name='MatrixProfileSearch',
-    save_path='results/{run_id}/{exp_id}/visualization.png',
+# 绘图工具
+from plotting import (
+    plot_comparison_samples,
+    plot_summary_bar,
+    plot_super_comparison_matrix,
+    plot_retrieval_fading,
+    generate_all_plots
 )
-plot_summary_bar('results/{run_id}/summary_metrics.csv', metric='MAE')
+
+# 生成所有分析图表
+generate_all_plots('./results/run_001')
+
+# 单独绘制超级对比矩阵
+plot_super_comparison_matrix('./results/run_001', metric='MAE')
+
+# 绘制溯源图
+plot_retrieval_fading('./results/run_001/exp_id', n_samples=5)
+```
+
+## 算法对比
+
+| 模型 | 精度 | 复杂度 | 关键特性 | 内存代价 |
+|------|------|--------|----------|----------|
+| PatternSearch | 精确 | O(n) | torch.cdist GPU 加速，逆距离加权 | ~32 MB |
+| LSHSearch | 近似 | O(1) | 随机投影哈希，两阶段重排 | ~1 MB |
+| SAXSearch | 模糊 | O(n) | PAA 降维，模糊匹配 | ~67 KB |
+| DTWSearch | 弹性对齐 | O(n·m·r) | GPU Sakoe-Chiba 累积 DP | ~410 MB |
+| **MatrixProfileSearch** | **精确子序列** | **O(n·m)** | **GPU Z-Norm 2D cdist** | ~32 MB |
+| TS2VecSearch | 深度表示 | O(n) | TCN 对比学习，DataLoader workers=8 | ~100 MB |
+| RAGSearch | 端到端 | O(n) | Siamese Cross-Attention | ~1.5 GB |
+
+## 输出结构
+
+```
+results/
+└── run_20260330_120000/          # Shell 脚本生成，所有实验共享
+    ├── summary_metrics.csv        # 所有实验汇总
+    ├── super_comparison_matrix.png # 顶会级对比热力图
+    ├── model_ranking_bar.png      # 模型排名柱状图
+    ├── logs/
+    │   └── *.log                  # 各实验日志
+    └── ETTm1_PatternSearch_seq96_pred96_k5_Rd/
+        ├── params.json
+        ├── metrics.json
+        ├── preds.npy              # 预测值（原始物理尺度）
+        ├── trues.npy
+        ├── X_test.npy
+        ├── retrieval_meta.npz     # 溯源证据（仅检索模型）
+        ├── visualization.png      # 单实验波形对比图
+        └── retrieval_analysis.png  # 溯源分析图（仅检索模型）
+```
+
+## Shell 脚本调度示例
+
+```bash
+# 完整参数扫描（7 个模型 × 多个超参组合）
+./scripts/run_experiments.sh --models all --seq-lens 96,192 --pred-lens 96,192 --revin-types dual --parallel --use-gpu
+
+# 仅扫描 PatternSearch
+./scripts/run_experiments.sh --model PatternSearch --seq-lens 96,192 --pred-lens 96 --top_k 3,5,10 --parallel
+
+# 仅扫描 RAGSearch（无 top_k 循环）
+./scripts/run_experiments.sh --model RAGSearch --seq-lens 96,192,336 --pred-lens 96,192 --rag_d_model 128,256 --rag_epochs 50,100 --parallel
+
+# 干跑测试（不执行，只打印命令）
+./scripts/run_experiments.sh --models all --dry-run
+
+# 限制并发数
+./scripts/run_experiments.sh --models all --max-jobs 4 --parallel
 ```
 
 ## 版本历史
 
 | 版本 | 更新内容 |
 |------|---------|
-| **v3.5** | `--run_dir` 参数（Shell 统一管理时间戳）；`num_workers=8, pin_memory=True` 解放 DataLoader CPU 瓶颈；chunk 爆炸式提升（MP→8192, DTW/Pattern→4096）；batch 1024 / d_model 256 / epochs 100；Shell 脚本智能路由（RAGSearch 跳过 top_k 循环）；plotting.py 全英文学术标签 |
-| **v3.4** | MatrixProfileSearch: 彻底移除 Python 循环，GPU Z-Norm 2D cdist 安全版，chunk=4096，V100 ~10 秒 |
-| **v3.3** | MatrixProfileSearch: 移除 stumpy 依赖，纯 PyTorch 向量化 |
-| **v3.2** | DTWSearch: GPU Sakoe-Chiba 累积 DP；MatrixProfileSearch: stumpy 工业级集成；RAGSearch: Siamese Cross-Attention |
-| **v3.1** | 新增 DTWSearch、MatrixProfileSearch、TS2VecSearch、RAGSearch 共 4 个前沿模型 |
-| **v3.0** | Dual-Dimension RevIN（temporal/feature/dual）、目录规范化（results/{exp_id}/）、静态可视化 |
+| **v4.0** | 大道至简重构：删除 Python 参数网格，Shell 全权调度；新增溯源证据输出和顶会级可视化 |
+| **v3.5** | chunk 爆炸式提升，Shell 脚本智能路由 |
+| **v3.4** | MatrixProfileSearch GPU Z-Norm 安全版 |
+| **v3.2** | DTWSearch GPU Sakoe-Chiba；RAGSearch Siamese Cross-Attention |
+| **v3.1** | 新增 DTWSearch、MatrixProfileSearch、TS2VecSearch、RAGSearch |
+| **v3.0** | Dual-Dimension RevIN |

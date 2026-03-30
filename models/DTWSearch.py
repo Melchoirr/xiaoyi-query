@@ -324,3 +324,88 @@ class DTWSearch:
 
         logger.info(f"[DTWSearch] predict done: output shape={Y_pred.shape}")
         return Y_pred
+
+    def get_retrieval_meta(
+        self,
+        X_test: np.ndarray,
+        top_k: Optional[int] = None,
+        n_samples: int = 5
+    ) -> tuple:
+        """
+        返回溯源证据：用于绘制"历史匹配溯源图"
+
+        Args:
+            X_test: shape (n_test, seq_len, n_feat) 归一化后的测试输入
+            top_k: 检索的邻居数量（默认使用 self.k）
+            n_samples: 返回前 n_samples 个测试样本的元数据（默认 5）
+
+        Returns:
+            Y_pred: 预测结果 shape (n_test, pred_len, n_feat)
+            retrieval_meta: dict 包含:
+                - topk_histories: (n_samples, k, seq_len, n_feat) 匹配到的历史序列
+                - topk_futures: (n_samples, k, pred_len, n_feat) 匹配到的未来序列
+                - topk_weights: (n_samples, k) 归一化的注意力权重
+        """
+        if not self.is_fitted:
+            raise RuntimeError("模型尚未拟合，请先调用 fit()")
+
+        k = top_k if top_k is not None else self.k
+        k = min(k, self.memory_X.shape[0])
+
+        # 处理输入维度
+        if X_test.ndim == 3:
+            n_test = X_test.shape[0]
+            X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
+        else:
+            n_test = X_test.shape[0]
+            X_flat = X_test.reshape(n_test, -1).astype(self.DTYPE)
+
+        # 获取完整预测
+        Y_pred = self.predict(X_test, top_k=top_k)
+
+        # 只对前 n_samples 个样本保存溯源证据
+        n_samples = min(n_samples, n_test)
+
+        # 原始维度
+        mem_X_raw = self.memory_X.reshape(-1, self.seq_len, self.n_features)
+        mem_Y_raw = self.memory_Y.reshape(-1, self.pred_len, self.n_features)
+
+        # 对前 n_samples 个样本检索（简化版本，使用欧氏距离近似）
+        with torch.no_grad():
+            xb = torch.from_numpy(X_flat[:n_samples]).float().to(self.device, non_blocking=True)
+            dist = torch.cdist(xb, self._mem_X_t, p=2)  # (n_samples, n_train)
+            vals, idx = torch.topk(dist, k, largest=False, dim=1)  # (n_samples, k)
+
+            idx_np = idx.cpu().numpy()
+            vals_np = vals.cpu().numpy()
+
+            # 归一化权重
+            vals_safe = np.clip(vals_np, 1e-10, None)
+            weights = 1.0 / vals_safe
+            weights = weights / weights.sum(axis=1, keepdims=True)
+
+            # 提取匹配的序列
+            topk_histories = mem_X_raw[idx_np].astype(np.float32)
+            topk_futures = mem_Y_raw[idx_np].astype(np.float32)
+
+            del xb, dist, vals, idx
+
+        gc.collect()
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+        logger.info(
+            f"[DTWSearch] Retrieval meta: {n_samples} samples, k={k}"
+        )
+
+        retrieval_meta = {
+            'topk_histories': topk_histories,
+            'topk_futures': topk_futures,
+            'topk_weights': weights.astype(np.float32),
+            'seq_len': self.seq_len,
+            'pred_len': self.pred_len,
+            'n_features': self.n_features,
+            'model_name': 'DTWSearch',
+        }
+
+        return Y_pred, retrieval_meta
