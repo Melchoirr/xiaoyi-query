@@ -1,4 +1,4 @@
-# 时序预测基线系统 (v4.0 大道至简重构版)
+# 时序预测基线系统 (v4.1 大道至简重构版)
 
 七种检索算法，基于记忆库 / 向量索引 / 深度学习的时序预测框架。
 
@@ -12,18 +12,17 @@
 | TS2VecSearch | 深度表示 | Dilated CNN 对比学习 + faiss |
 | RAGSearch | 端到端 | Siamese Cross-Attention |
 
-## 核心变更 (v4.0 大道至简重构)
+## 核心变更 (v4.1 Bug 修复与功能增强)
 
-本次重构遵循"大道至简"的设计理念：
+本次更新修复了三个底层维度的 Bug，并新增了顶会级"跨模型对比"绘图功能：
 
-1. **Python 端纯粹执行器**：删除所有参数网格展开逻辑（ExperimentRunner, _expand_configs），argparse 简化为标量输入
-2. **Shell 端智能调度**：Shell 脚本全权负责参数组合生成和并行调度，case 语句为每个算法编写独立的超参循环
-3. **溯源证据输出**：检索模型（PatternSearch, DTWSearch, TS2VecSearch）新增 `get_retrieval_meta()` 方法，输出溯源证据
-4. **顶会级可视化**：新增两张顶级分析大图
-   - `plot_super_comparison_matrix`: 全局热力图/柱状图网格对比
-   - `plot_retrieval_fading`: 历史匹配溯源图（权重透明度绑定）
+1. **Bug Fix 1 - Shell `--models all` 展开**：修复 Bash 脚本中 `all` 无法正确展开为 7 个模型的 Bug
+2. **Bug Fix 2 - RevIN 广播崩溃**：修复 `axis=-1` 导致的张量形状不匹配问题，改为 `axis=(1, 2)` 确保统计量可广播到任意形状
+3. **Bug Fix 3 - 溯源元数量纲**：修复 `retrieval_meta.npz` 停留在归一化空间的问题，新增反归一化步骤投影回物理尺度
+4. **功能增强 - 跨模型对比图**：新增 `plot_cross_model_comparison()` 函数，自动生成多模型同屏对比大图
+5. **去雾化优化**：移除所有图表中的 `marker` 参数，提高 DPI 至 300，确保线条平滑清晰
 
-## 安装
+## v4.0/v4.1 架构设计
 
 ```bash
 # 核心依赖
@@ -57,6 +56,7 @@ python run.py --model PatternSearch --seq_len 96 --pred_len 96 --top_k 5 --weigh
 │  │    - DTWSearch: top_k × dtw_radius                          │  │
 │  │    - RAGSearch: d_model × n_heads × epochs                  │  │
 │  │  后台任务 (&) + wait 并发控制                                 │  │
+│  │  实验结束：自动调用 Python 生成超级矩阵图 + 跨模型对比图        │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                     │
 │                              ▼                                     │
@@ -65,14 +65,15 @@ python run.py --model PatternSearch --seq_len 96 --pred_len 96 --top_k 5 --weigh
 │  │  单进单出：每次调用执行单一实验                               │  │
 │  │  - 训练 → 推理 → 计算指标 → 保存结果                        │  │
 │  │  - 追加到 summary_metrics.csv                               │  │
-│  │  - 检索模型：额外保存 retrieval_meta.npz                     │  │
+│  │  - 检索模型：额外保存 retrieval_meta.npz (物理尺度)          │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                     │
 │                              ▼                                     │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │                  可视化层 (plotting.py)                      │  │
-│  │  - 实验结束：自动绘制单实验波形对比图                         │  │
+│  │  - 实验结束：自动绘制单实验波形对比图 (DPI=300)               │  │
 │  │  - Shell 结束：绘制超级对比矩阵 + 溯源图                     │  │
+│  │  - 自动生成前 3 个样本的跨模型对比图                         │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -100,6 +101,7 @@ from plotting import (
     plot_summary_bar,
     plot_super_comparison_matrix,
     plot_retrieval_fading,
+    plot_cross_model_comparison,
     generate_all_plots
 )
 
@@ -111,6 +113,9 @@ plot_super_comparison_matrix('./results/run_001', metric='MAE')
 
 # 绘制溯源图
 plot_retrieval_fading('./results/run_001/exp_id', n_samples=5)
+
+# 绘制跨模型对比图（指定样本和特征）
+plot_cross_model_comparison('./results/run_001', sample_id=0, feat_idx=-1)
 ```
 
 ## 算法对比
@@ -133,6 +138,9 @@ results/
     ├── summary_metrics.csv        # 所有实验汇总
     ├── super_comparison_matrix.png # 顶会级对比热力图
     ├── model_ranking_bar.png      # 模型排名柱状图
+    ├── cross_model_comparison_sample0.png  # 跨模型对比图（样本0）
+    ├── cross_model_comparison_sample1.png  # 跨模型对比图（样本1）
+    ├── cross_model_comparison_sample2.png  # 跨模型对比图（样本2）
     ├── logs/
     │   └── *.log                  # 各实验日志
     └── ETTm1_PatternSearch_seq96_pred96_k5_Rd/
@@ -141,7 +149,7 @@ results/
         ├── preds.npy              # 预测值（原始物理尺度）
         ├── trues.npy
         ├── X_test.npy
-        ├── retrieval_meta.npz     # 溯源证据（仅检索模型）
+        ├── retrieval_meta.npz     # 溯源证据（物理尺度，仅检索模型）
         ├── visualization.png      # 单实验波形对比图
         └── retrieval_analysis.png  # 溯源分析图（仅检索模型）
 ```
@@ -169,6 +177,7 @@ results/
 
 | 版本 | 更新内容 |
 |------|---------|
+| **v4.1** | 修复 Shell `--models all` Bug；修复 RevIN Feature 维度广播崩溃（axis=(1,2)）；修复溯源元数据量纲错位（反归一化回物理尺度）；新增跨模型对比图；去雾化（移除 marker，DPI=300） |
 | **v4.0** | 大道至简重构：删除 Python 参数网格，Shell 全权调度；新增溯源证据输出和顶会级可视化 |
 | **v3.5** | chunk 爆炸式提升，Shell 脚本智能路由 |
 | **v3.4** | MatrixProfileSearch GPU Z-Norm 安全版 |

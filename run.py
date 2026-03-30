@@ -139,7 +139,10 @@ def apply_revin(
     prefix: str = 'X'
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
-    Dual-Dimension RevIN 归一化
+    Dual-Dimension RevIN 归一化 (v4.1 修复)
+
+    核心修复：将 axis=-1 改为 axis=(1, 2)，确保统计量形状为 (B, 1, 1)
+    可以完美广播到任意 (B, T, F) 形状的张量（无论 seq_len == pred_len 或不相等）
 
     Args:
         X: shape (n, seq_len, n_feat) 的 float32 数组
@@ -165,18 +168,20 @@ def apply_revin(
         logger.info(f"[RevIN-{prefix}] temporal: mean={mean.shape}, std={std.shape}")
 
     elif revin_type == 'feature':
-        mean = np.mean(X, axis=-1, keepdims=True)
-        std = _safe_std(np.std(X, axis=-1, keepdims=True))
+        # 修复：同时聚合时间步和特征维度，得到 (B, 1, 1) 可广播标量
+        mean = np.mean(X, axis=(1, 2), keepdims=True)  # (B, 1, 1)
+        std = _safe_std(np.std(X, axis=(1, 2), keepdims=True))  # (B, 1, 1)
         X_out = ((X - mean) / std).astype(np.float32)
         stats = {'mean_f': mean, 'std_f': std}
         logger.info(f"[RevIN-{prefix}] feature: mean={mean.shape}, std={std.shape}")
 
     elif revin_type == 'dual':
-        mean_f = np.mean(X, axis=-1, keepdims=True)
-        std_f = _safe_std(np.std(X, axis=-1, keepdims=True))
+        # 修复：feature 归一化先聚合 (B, T, F) → (B, 1, 1)，可广播到任意形状
+        mean_f = np.mean(X, axis=(1, 2), keepdims=True)  # (B, 1, 1)
+        std_f = _safe_std(np.std(X, axis=(1, 2), keepdims=True))  # (B, 1, 1)
         X_f = ((X - mean_f) / std_f).astype(np.float32)
-        mean_t = np.mean(X_f, axis=1, keepdims=True)
-        std_t = _safe_std(np.std(X_f, axis=1, keepdims=True))
+        mean_t = np.mean(X_f, axis=1, keepdims=True)  # (B, 1, F)
+        std_t = _safe_std(np.std(X_f, axis=1, keepdims=True))  # (B, 1, F)
         X_out = ((X_f - mean_t) / std_t).astype(np.float32)
         stats = {'mean_f': mean_f, 'std_f': std_f, 'mean_t': mean_t, 'std_t': std_t}
         logger.info(f"[RevIN-{prefix}] dual: feature {mean_f.shape} -> temporal {mean_t.shape}")
@@ -192,7 +197,11 @@ def inverse_revin(
     revin_stats: Dict[str, np.ndarray],
     revin_type: str
 ) -> np.ndarray:
-    """Dual-Dimension RevIN 反归一化"""
+    """
+    Dual-Dimension RevIN 反归一化 (v4.1 修复)
+
+    核心修复：支持任意形状 (B, T, F) 的输入，无论是 seq_len == pred_len 或不相等
+    """
     if revin_type == 'none':
         return Y_norm.astype(np.float32)
 
@@ -204,6 +213,7 @@ def inverse_revin(
     elif revin_type == 'feature':
         mean_f = revin_stats['mean_f']
         std_f = revin_stats['std_f']
+        # mean_f/std_f 形状为 (B, 1, 1)，可广播到任意 (B, T, F)
         return (Y_norm * std_f + mean_f).astype(np.float32)
 
     elif revin_type == 'dual':
@@ -211,10 +221,53 @@ def inverse_revin(
         std_t = revin_stats['std_t']
         mean_f = revin_stats['mean_f']
         std_f = revin_stats['std_f']
-        Y_t = Y_norm * std_t + mean_t
-        return (Y_t * std_f + mean_f).astype(np.float32)
+        # 第一步：reverse temporal normalization
+        Y_t = Y_norm * std_t + mean_t  # (B, T, F)
+        # 第二步：reverse feature normalization (mean_f/std_f 形状 (B, 1, 1))
+        Y_out = Y_t * std_f + mean_f
+        return Y_out.astype(np.float32)
 
     return Y_norm.astype(np.float32)
+
+
+def _denormalize_retrieval_meta(
+    meta: Dict[str, Any],
+    revin_stats: Dict[str, np.ndarray],
+    revin_type: str
+) -> Dict[str, np.ndarray]:
+    """
+    将溯源证据从归一化空间反归一化到物理尺度 (v4.1 新增)
+
+    Args:
+        meta: 溯源证据字典，包含 topk_histories, topk_futures, topk_weights 等
+        revin_stats: apply_revin 返回的统计量
+        revin_type: 归一化类型
+
+    Returns:
+        新的字典，topk_histories 和 topk_futures 已反归一化
+    """
+    if revin_type == 'none':
+        return meta
+
+    result = dict(meta)  # 复制原始数据
+
+    # 反归一化 topk_histories
+    topk_hist = meta.get('topk_histories')
+    if topk_hist is not None and topk_hist.size > 0:
+        n_samples, k, seq_len, n_feat = topk_hist.shape
+        topk_hist_3d = topk_hist.reshape(n_samples * k, seq_len, n_feat)
+        topk_hist_denorm = inverse_revin(topk_hist_3d, revin_stats, revin_type)
+        result['topk_histories'] = topk_hist_denorm.reshape(n_samples, k, seq_len, n_feat)
+
+    # 反归一化 topk_futures
+    topk_fut = meta.get('topk_futures')
+    if topk_fut is not None and topk_fut.size > 0:
+        n_samples, k, pred_len, n_feat = topk_fut.shape
+        topk_fut_3d = topk_fut.reshape(n_samples * k, pred_len, n_feat)
+        topk_fut_denorm = inverse_revin(topk_fut_3d, revin_stats, revin_type)
+        result['topk_futures'] = topk_fut_denorm.reshape(n_samples, k, pred_len, n_feat)
+
+    return result
 
 
 # ============================================================
@@ -388,15 +441,20 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         np.save(os.path.join(exp_dir, 'trues.npy'), Y_test_inv)
         np.save(os.path.join(exp_dir, 'X_test.npy'), history_preview_raw.reshape(MAX_PREVIEW, -1))
 
-        # 保存溯源证据（如果有）
+        # 保存溯源证据（如果有）- 反归一化到物理尺度
         if retrieval_meta is not None:
+            log.info(f"[{model_name}] Denormalizing retrieval meta to physical scale...")
+            retrieval_meta_phys = _denormalize_retrieval_meta(
+                retrieval_meta, revin_stats_test, revin_type
+            )
             np.savez_compressed(
                 os.path.join(exp_dir, 'retrieval_meta.npz'),
-                **retrieval_meta
+                **retrieval_meta_phys
             )
-            log.info(f"[{model_name}] Retrieval meta saved: topk_hist={retrieval_meta.get('topk_histories', np.array([])).shape}, "
-                     f"topk_fut={retrieval_meta.get('topk_futures', np.array([])).shape}, "
-                     f"weights={retrieval_meta.get('topk_weights', np.array([])).shape}")
+            log.info(f"[{model_name}] Retrieval meta saved (physical scale): "
+                     f"topk_hist={retrieval_meta_phys.get('topk_histories', np.array([])).shape}, "
+                     f"topk_fut={retrieval_meta_phys.get('topk_futures', np.array([])).shape}, "
+                     f"weights={retrieval_meta_phys.get('topk_weights', np.array([])).shape}")
 
         del test_set, Y_pred_flat, Y_test_flat
         gc.collect()

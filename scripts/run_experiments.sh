@@ -375,15 +375,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── 展开 all 为完整模型列表（必须在 IFS 解析之前）─────────────────
+if [[ "$MODELS" == "all" ]]; then
+    MODELS="PatternSearch,LSHSearch,SAXSearch,DTWSearch,MatrixProfileSearch,TS2VecSearch,RAGSearch"
+fi
+
 IFS=',' read -ra MODEL_ARR <<< "$MODELS"
 IFS=',' read -ra SEQ_ARR <<< "$SEQ_LENS"
 IFS=',' read -ra PRED_ARR <<< "$PRED_LENS"
 IFS=',' read -ra REVIN_ARR <<< "$REVIN_TYPES"
-
-# 解析 all
-if [[ "${MODEL_ARR[0]}" == "all" ]]; then
-    MODEL_ARR=(PatternSearch LSHSearch SAXSearch DTWSearch MatrixProfileSearch TS2VecSearch RAGSearch)
-fi
 
 # ── 头部信息 ──────────────────────────────────────────────────────
 echo "================================================================================"
@@ -694,7 +694,7 @@ echo ""
 if [[ "$DRY_RUN" == "false" ]]; then
     echo "Generating summary visualizations..."
 
-    # 调用 Python 生成超级矩阵图
+    # 调用 Python 生成超级矩阵图 + 跨模型对比图
     "$PYTHON" - "$GLOBAL_RUN_DIR" <<'PYEOF'
 import sys
 import os
@@ -702,10 +702,20 @@ import os
 run_dir = sys.argv[1] if len(sys.argv) > 1 else '.'
 
 try:
-    from plotting import generate_all_plots
+    from plotting import generate_all_plots, plot_cross_model_comparison
     print(f"[Plotting] Generating all plots for: {run_dir}")
     generate_all_plots(run_dir)
-    print("[Plotting] All plots generated successfully!")
+    print("[Plotting] Super matrix and retrieval plots generated successfully!")
+
+    # 生成前 3 个样本的跨模型对比图
+    print("[Plotting] Generating cross-model comparison plots...")
+    for sample_id in range(3):
+        try:
+            plot_cross_model_comparison(run_dir, sample_id=sample_id, feat_idx=-1)
+            print(f"[Plotting] Cross-model comparison for sample {sample_id} generated!")
+        except Exception as e:
+            print(f"[Plotting] Failed to generate cross-model plot for sample {sample_id}: {e}")
+
 except ImportError as e:
     print(f"[Plotting] Import error: {e}")
 except Exception as e:
@@ -724,6 +734,7 @@ PYEOF
     echo "  Summary CSV:   $GLOBAL_RUN_DIR/summary_metrics.csv"
     echo "  Super Matrix:  $GLOBAL_RUN_DIR/super_comparison_matrix.png"
     echo "  Model Ranking: $GLOBAL_RUN_DIR/model_ranking_bar.png"
+    echo "  Cross-Model:   $GLOBAL_RUN_DIR/cross_model_comparison_sample*.png"
     echo "  Logs:          $GLOBAL_RUN_DIR/logs/"
     echo "================================================================================"
 fi
