@@ -126,7 +126,7 @@ def _draw_single_subplot(
     show_regions: bool = True
 ):
     """
-    Draw four-segment waveform on one axes.
+    Draw four-segment waveform on one axes (v4.2: 增粗线条，增强对比度).
     """
     x_a = np.arange(-seq_len, 0)
     x_b = np.arange(-pred_len, 0)
@@ -134,25 +134,25 @@ def _draw_single_subplot(
     x_d = np.arange(0, pred_len)
 
     if show_regions:
-        ax.axvspan(-seq_len - 0.5, 0 - 0.5, alpha=0.04, color='gray', zorder=0)
+        ax.axvspan(-seq_len - 0.5, 0 - 0.5, alpha=0.06, color='gray', zorder=0)
 
-    # Region A: Historical Lookback (去雾化)
-    ax.plot(x_a, seg_a, color='#7fb3d3', linewidth=1.8, alpha=0.85,
+    # Region A: Historical Lookback (灰色上下文：linewidth=1.5, alpha=0.8)
+    ax.plot(x_a, seg_a, color='#7fb3d3', linewidth=1.5, alpha=0.8,
             marker='None', label='A: Hist. Lookback', zorder=3)
 
-    # Region B: Historical Prediction (去雾化)
+    # Region B: Historical Prediction (灰色上下文：linewidth=1.5, alpha=0.8)
     if len(x_b) == len(seg_b):
-        ax.plot(x_b, seg_b, color='#f5b041', linewidth=1.8, alpha=0.85,
+        ax.plot(x_b, seg_b, color='#f5b041', linewidth=1.5, alpha=0.8,
                 marker='None', label='B: Hist. Pred', zorder=3)
 
-    # Region C: Test Input (去雾化)
-    ax.plot(x_c, seg_c, color='#1f4e79', linewidth=2.2, alpha=0.9,
+    # Region C: Test Input (深蓝：linewidth=1.5, alpha=0.9)
+    ax.plot(x_c, seg_c, color='#1f4e79', linewidth=1.5, alpha=0.9,
             marker='None', label='C: Test Input', zorder=4)
 
-    # Region D: Pred vs True (去雾化)
-    ax.plot(x_d, seg_d_true, color='#28a745', linewidth=2.2,
+    # Region D: Ground Truth (深绿：linewidth=2.0) + Prediction (红色虚线：linewidth=1.5, alpha=0.9)
+    ax.plot(x_d, seg_d_true, color='#28a745', linewidth=2.0,
             marker='None', label='D: Ground Truth', zorder=5)
-    ax.plot(x_d, seg_d_pred, color='#c00000', linewidth=2.2,
+    ax.plot(x_d, seg_d_pred, color='#c00000', linewidth=1.5, alpha=0.9,
             linestyle='--', marker='None', label='D: Prediction', zorder=6)
 
     # X=0 separator
@@ -160,15 +160,15 @@ def _draw_single_subplot(
     ax.axhline(y=0, color='lightgray', linewidth=0.8, zorder=1)
 
     ax.set_xlim(-seq_len - 1, pred_len + 1)
-    ax.set_xlabel('Time Offset (0 = Prediction Start)', fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
+    ax.set_xlabel('Time Offset (0 = Prediction Start)', fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
 
     ax.set_title(
         model_name + " | sample=" + str(sample_idx)
         + " | " + feat_label
         + " | pred=" + str(pred_len),
-        fontsize=8, pad=3
+        fontsize=9, pad=4
     )
 
 
@@ -187,13 +187,13 @@ def plot_comparison_samples(
     params: Optional[Dict[str, Any]] = None,
     save_path: Optional[str] = None,
     n_samples: int = 9,
-    figsize: tuple = (14, 10),
+    figsize: tuple = None,  # v4.2: 自动计算最优尺寸
     feat_idx: int = -1,
     best_matches: Optional[List[Optional[Dict]]] = None,
-    dpi: int = 300  # v4.1: 提高 DPI 确保线条平滑清晰
+    dpi: int = 300  # v4.2: 固定 300 DPI 高清输出
 ):
     """
-    Generate four-segment waveform comparison grid.
+    Generate four-segment waveform comparison grid (v4.2: 优化视觉清晰度).
     """
     if not _HAS_MATPLOTLIB:
         print(
@@ -213,12 +213,18 @@ def plot_comparison_samples(
 
     n_available = min(history.shape[0], preds.shape[0], trues.shape[0])
     if n_available == 0:
-        _plot_placeholder(save_path, "No valid data", figsize)
+        _plot_placeholder(save_path, "No valid data", (10, 6))
         return
 
     n_samples = min(n_samples, n_available)
     n_cols = int(np.ceil(np.sqrt(n_samples)))
     n_rows = int(np.ceil(n_samples / n_cols))
+
+    # v4.2: 自动计算最优画布尺寸，确保每个子图有足够的显示空间
+    if figsize is None:
+        fig_w = max(12, 4 * n_cols)   # 每个子图至少 4 英寸宽
+        fig_h = max(8, 2.5 * n_rows)  # 每个子图至少 2.5 英寸高
+        figsize = (fig_w, fig_h)
 
     feat_label = _get_feature_label(feat_idx, n_features)
 
@@ -229,8 +235,8 @@ def plot_comparison_samples(
     gs = gridspec.GridSpec(
         n_rows, n_cols,
         figure=fig,
-        hspace=0.45,
-        wspace=0.35
+        hspace=0.5,   # v4.2: 增大垂直间距防止标签重叠
+        wspace=0.4    # v4.2: 增大水平间距
     )
 
     for i, idx in enumerate(sample_indices):

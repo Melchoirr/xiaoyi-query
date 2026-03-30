@@ -21,6 +21,7 @@ DTWSearch: 动态时间规整检索（v3.2 工业级版）
 
 import gc
 import logging
+import time
 from typing import Optional, Union
 
 import numpy as np
@@ -38,18 +39,72 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────
+# GPU OOM 重试机制（v4.2: 多进程并发排队等待显存）
+# ─────────────────────────────────────────────────────────────
+
+def _gpu_retry_with_sleep(
+    forward_fn,
+    *args,
+    max_retries: int = 30,
+    base_sleep: float = 5.0,
+    **kwargs
+):
+    """
+    GPU 大显存计算的重试包装器（v4.2 新增）
+
+    当多进程并发导致 CUDA OOM 时，自动清理缓存并渐进式等待其他 worker 释放显存。
+    避免因单个 worker OOM 导致整个实验失败。
+
+    Args:
+        forward_fn: 需要执行的 GPU 计算函数
+        *args: 函数的positional参数
+        max_retries: 最大重试次数（默认30次，约5+7+...+63=340秒）
+        base_sleep: 基础等待时间（秒），每次失败后递增
+        **kwargs: 函数的keyword参数
+
+    Returns:
+        forward_fn 的返回值
+
+    Raises:
+        torch.cuda.OutOfMemoryError: 超出最大等待时间仍OOM
+    """
+    for attempt in range(max_retries):
+        try:
+            return forward_fn(*args, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            if attempt < max_retries - 1:
+                torch.cuda.empty_cache()
+                gc.collect()
+                sleep_time = base_sleep + attempt * 2  # 渐进式等待: 5, 7, 9, 11, ...
+                logger.warning(
+                    f"[DTWSearch] CUDA OOM on attempt {attempt + 1}/{max_retries}. "
+                    f"Waiting {sleep_time:.1f}s for GPU memory to be released..."
+                )
+                time.sleep(sleep_time)
+            else:
+                logger.error(
+                    f"[DTWSearch] CUDA OOM after {max_retries} attempts. "
+                    f"Consider reducing --predict_chunk_size or --train_chunk_size."
+                )
+                raise
+
+
+# ─────────────────────────────────────────────────────────────
 # GPU 累积 DP（严格 Sakoe-Chiba 约束，无 4D 中间张量）
 # ─────────────────────────────────────────────────────────────
 
 def _cuda_dtw_forward(
     xb: torch.Tensor,   # (chunk, m)   query
-    mem: torch.Tensor, # (mc, m)      记忆库片段
+    mem: torch.Tensor,    # (mc, m)      记忆库片段
+    max_retries: int = 30,
 ) -> torch.Tensor:
     """
-    GPU 严格 Sakoe-Chiba DTW 累积 DP
+    GPU 严格 Sakoe-Chiba DTW 累积 DP (v4.2: 内置 OOM 重试)
 
     对 chunk 个 query 与 mc 个记忆样本，计算 (chunk, mc) 的 DTW 距离矩阵。
     全程在 GPU 上完成，仅用 (chunk, mc, m) 的 3D 张量，避免 (chunk, mc, m, m) 爆炸。
+
+    当多进程并发时，自动捕获 OOM 并排队等待。
 
     DP 公式（严格 Sakoe-Chiba |i-j| ≤ r）：
         D[0, j] = d(0, j)
@@ -60,40 +115,45 @@ def _cuda_dtw_forward(
     Args:
         xb: (chunk, m) query — 已在 GPU
         mem: (mc, m) memory — 已在 GPU
+        max_retries: OOM 最大重试次数
 
     Returns:
         dtw: (chunk, mc) DTW 距离 — GPU Tensor
     """
-    chunk, m = xb.shape
-    mc = mem.shape[0]
-    device = xb.device
-    r = min(5, m - 1)  # 硬编码 radius=5，与 self.radius 同步
+    def _forward_impl():
+        chunk, m = xb.shape
+        mc = mem.shape[0]
+        device = xb.device
+        r = min(5, m - 1)  # 硬编码 radius=5，与 self.radius 同步
 
-    # 逐点距离矩阵 D0 = |x_q[i] - x_mem[j]| → (chunk, mc, m)
-    # chunk × mc × m ≈ 128 × 8353 × 96 × 4 = 410 MB（可接受）
-    dist = torch.abs(xb.unsqueeze(1) - mem.unsqueeze(0))  # (chunk, mc, m)
+        # 逐点距离矩阵 D0 = |x_q[i] - x_mem[j]| → (chunk, mc, m)
+        # chunk × mc × m ≈ 128 × 8353 × 96 × 4 = 410 MB（可接受）
+        dist = torch.abs(xb.unsqueeze(1) - mem.unsqueeze(0))  # (chunk, mc, m)
 
-    # 累积距离 (chunk, mc, m) — 原地更新
-    accum = dist.clone()  # D[0, :] = d(0, :)
+        # 累积距离 (chunk, mc, m) — 原地更新
+        accum = dist.clone()  # D[0, :] = d(0, :)
 
-    # 前向 DP：逐对角线处理
-    # 对角线 k: D[:, :, k] = dist[:, :, k] + min(valid_neighbors)
-    # valid_neighbors = D_prev[:, :, k-r ... k+r] 沿时间轴（最后维）取 min
-    for k in range(1, m):
-        # 取 k-1 行的有效区域 [max(0, k-r): min(m, k+r)]
-        lo = max(0, k - r)
-        hi = min(m, k + r)
-        prev_window = accum[:, :, max(0, k - r - 1):hi - 1]  # (chunk, mc, hi-lo)
-        # 逐点加到 dist[:, :, k]
-        acc_k = dist[:, :, k:k + 1] + prev_window.amin(dim=-1, keepdim=True)  # (chunk, mc, 1)
-        accum[:, :, k] = acc_k.squeeze(-1)
+        # 前向 DP：逐对角线处理
+        # 对角线 k: D[:, :, k] = dist[:, :, k] + min(valid_neighbors)
+        # valid_neighbors = D_prev[:, :, k-r ... k+r] 沿时间轴（最后维）取 min
+        for k in range(1, m):
+            # 取 k-1 行的有效区域 [max(0, k-r): min(m, k+r)]
+            lo = max(0, k - r)
+            hi = min(m, k + r)
+            prev_window = accum[:, :, max(0, k - r - 1):hi - 1]  # (chunk, mc, hi-lo)
+            # 逐点加到 dist[:, :, k]
+            acc_k = dist[:, :, k:k + 1] + prev_window.amin(dim=-1, keepdim=True)  # (chunk, mc, 1)
+            accum[:, :, k] = acc_k.squeeze(-1)
 
-    # 提取最后一列的最小值（D[m-1, j]，j ∈ [m-1-r, m-1]）
-    lo = max(0, m - 1 - r)
-    dtw = accum[:, :, lo:].amin(dim=-1)  # (chunk, mc)
+        # 提取最后一列的最小值（D[m-1, j]，j ∈ [m-1-r, m-1]）
+        lo = max(0, m - 1 - r)
+        dtw = accum[:, :, lo:].amin(dim=-1)  # (chunk, mc)
 
-    del dist, accum
-    return dtw
+        del dist, accum
+        return dtw
+
+    # v4.2: 包装 OOM 重试逻辑
+    return _gpu_retry_with_sleep(_forward_impl, max_retries=max_retries)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -206,9 +266,9 @@ class DTWSearch:
 
     def predict(self, X_test: np.ndarray, top_k: Optional[int] = None) -> np.ndarray:
         """
-        分块 DTW 检索 + 逆距离加权 KNN
+        分块 DTW 检索 + 逆距离加权 KNN (v4.2: OOM 重试排队)
 
-        GPU: _cuda_dtw_forward（无中间 4D 张量）
+        GPU: _cuda_dtw_forward（无中间 4D 张量），内置 OOM 重试机制
         CPU: _cpu_dtw_chunked（tslearn 精确）
         """
         if not self.is_fitted:
@@ -252,16 +312,22 @@ class DTWSearch:
                 # ── 距离计算（GPU 或 CPU）────────────────────────
                 if self.device.type == 'cuda':
                     # GPU 路径：_cuda_dtw_forward，显存 O(chunk·mc·m)
-                    mc = self.train_chunk_size
-                    dtw_chunk = torch.zeros(cur_chunk, n_train, dtype=torch.float32, device=self.device)
+                    # v4.2: 包装整个 GPU 计算块以处理 OOM
+                    def _gpu_compute_block():
+                        mc = self.train_chunk_size
+                        dtw_chunk = torch.zeros(cur_chunk, n_train, dtype=torch.float32, device=self.device)
 
-                    for m_start in range(0, n_train, mc):
-                        m_end = min(m_start + mc, n_train)
-                        mem_slice = mem_X[m_start:m_end]   # (mc, m)
-                        dtw_part = _cuda_dtw_forward(xb, mem_slice)  # (chunk, mc)
-                        dtw_chunk[:, m_start:m_end] = dtw_part
-                        del mem_slice, dtw_part
-                        torch.cuda.empty_cache()
+                        for m_start in range(0, n_train, mc):
+                            m_end = min(m_start + mc, n_train)
+                            mem_slice = mem_X[m_start:m_end]   # (mc, m)
+                            dtw_part = _cuda_dtw_forward(xb, mem_slice)  # (chunk, mc)
+                            dtw_chunk[:, m_start:m_end] = dtw_part
+                            del mem_slice, dtw_part
+                            torch.cuda.empty_cache()
+
+                        return dtw_chunk
+
+                    dtw_chunk = _gpu_retry_with_sleep(_gpu_compute_block)
 
                     # 转 numpy 用于 top-k
                     dtw_np = dtw_chunk.cpu().numpy()
