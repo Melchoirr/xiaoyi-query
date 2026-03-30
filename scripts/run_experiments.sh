@@ -151,9 +151,12 @@ STAB
                     model_params=(
                         --model "$model"
                     )
+                    # Initialize k_disp to avoid unbound variable error
+                    k_disp=""
                     case "$model" in
                         RAGSearch)
                             # RAGSearch: no --top_k at all
+                            k_disp="5"
                             ;;
                         TS2VecSearch|MatrixProfileSearch|DTWSearch|PatternSearch|LSHSearch|SAXSearch)
                             # Strip leading zeros from $k for placeholder "5" etc.
