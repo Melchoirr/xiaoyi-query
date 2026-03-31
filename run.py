@@ -378,34 +378,52 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
         del model, X_test_norm
         gc.collect()
 
-        # 指标计算（在归一化空间）
-        metrics = calculate_all_metrics(Y_pred_norm, Y_test_3d)
+        # ═══════════════════════════════════════════════════════════════════
+        # v4.3 修复：指标必须在正确空间计算，X_test 必须反归一化
+        # ═══════════════════════════════════════════════════════════════════
 
-        elapsed = time.time() - start_time
-        log.info(f"[{model_name}] Norm-space MAE={metrics.get('MAE', 0):.4f} "
-                 f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
-
-        # 反归一化
-        Y_pred = inverse_revin(Y_pred_norm, revin_stats_test, revin_type)
+        # 1. 先执行 RevIN 反归一化，回到 TSLib 空间
+        Y_pred_tslib = inverse_revin(Y_pred_norm, revin_stats_test, revin_type)
         del Y_pred_norm
         gc.collect()
 
-        # 保存 .npy
-        n_test, p_len, _ = Y_pred.shape
-        Y_pred_flat = Y_pred.reshape(-1, n_feat)
+        # 2. 在正确的 TSLib 空间下计算 Metrics（不是归一化空间！）
+        metrics = calculate_all_metrics(Y_pred_tslib, Y_test_3d)
+
+        elapsed = time.time() - start_time
+        log.info(f"[{model_name}] TSLib-space MAE={metrics.get('MAE', 0):.4f} "
+                 f"MSE={metrics.get('MSE', 0):.4f} elapsed={elapsed:.1f}s")
+
+        # 3. 全局反标准化，恢复真实物理尺度（必须在 del test_set 之前）
+        n_test, p_len, n_feat = Y_pred_tslib.shape
+        Y_pred_flat = Y_pred_tslib.reshape(-1, n_feat)
         Y_test_flat = Y_test_3d.reshape(-1, n_feat)
 
-        Y_pred_inv = test_set.inverse_transform(Y_pred_flat)
-        Y_test_inv = test_set.inverse_transform(Y_test_flat)
+        Y_pred_inv = test_set.inverse_transform(Y_pred_flat).reshape(n_test, p_len, n_feat).astype(np.float32)
+        Y_test_inv = test_set.inverse_transform(Y_test_flat).reshape(n_test, p_len, n_feat).astype(np.float32)
 
-        Y_pred_inv = Y_pred_inv.reshape(n_test, p_len, n_feat).astype(np.float32)
-        Y_test_inv = Y_test_inv.reshape(n_test, p_len, n_feat).astype(np.float32)
+        # 4. 修复 X_Test 的量纲：也执行物理尺度恢复！
+        X_test_flat_phys = history_preview_raw.reshape(-1, n_feat)
+        X_test_inv_phys = test_set.inverse_transform(X_test_flat_phys).reshape(MAX_PREVIEW, seq_len, n_feat).astype(np.float32)
 
+        # 5. 保存 npy（全部都是物理尺度）
         np.save(os.path.join(exp_dir, 'preds.npy'), Y_pred_inv)
         np.save(os.path.join(exp_dir, 'trues.npy'), Y_test_inv)
-        np.save(os.path.join(exp_dir, 'X_test.npy'), history_preview_raw.reshape(MAX_PREVIEW, -1))
+        np.save(os.path.join(exp_dir, 'X_test.npy'), X_test_inv_phys.reshape(MAX_PREVIEW, -1))
 
-        # ── 补丁一：修复检索元数据反归一化广播错误 ─────────────────────────
+        # 6. 现在可以安全删除 test_set
+        del test_set, Y_pred_flat, Y_test_flat, Y_pred_tslib
+        gc.collect()
+
+        # preview 使用物理尺度数据
+        preview_hist_list = X_test_inv_phys[:MAX_PREVIEW].reshape(MAX_PREVIEW, seq_len * n_feat).tolist()
+        preview_pred = Y_pred_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+        preview_true = Y_test_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
+
+        del Y_pred_inv, Y_test_inv
+        gc.collect()
+
+        # ── 补丁一（延续）：修复检索元数据反归一化广播错误 ─────────────────
         # 关键问题：topk_hist 被展开为 (n_meta * k_meta)，而 revin_stats 是 (n_test, ...)
         # 解决方案：截取前 n_meta 个统计量，在 axis=0 上重复 k_meta 次对齐
         meta_file = os.path.join(exp_dir, 'retrieval_meta.npz')
@@ -424,7 +442,7 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
                 sliced_stats = {}
                 for key, val in revin_stats_test.items():
                     v_slice = val[:n_meta]  # 取前 n_meta 个测试样本的统计量 (n_meta, 1, ...)
-                    sliced_stats[key] = np.repeat(v_slice, k_meta, axis=0)  # 展开对齐为 (n_meta * k_meta, 1, ...)
+                    sliced_stats[key] = np.repeat(v_slice, k_meta, axis=0)  # 展开对齐
 
                 # 执行反归一化（先 reshape 为 3D）
                 hist_3d = topk_hist.reshape(-1, s_len, f_len)  # (n_meta * k, seq_len, n_feat)
@@ -433,12 +451,10 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
                 hist_inv = inverse_revin(hist_3d, sliced_stats, revin_type)
                 futu_inv = inverse_revin(futu_3d, sliced_stats, revin_type)
 
-                # 恢复物理量纲（inverse_transform）
-                hist_inv_flat = hist_inv.reshape(-1, f_len)
-                futu_inv_flat = futu_inv.reshape(-1, f_len)
-
-                hist_inv_phys = test_set.inverse_transform(hist_inv_flat).reshape(n_meta, k_meta, s_len, f_len).astype(np.float32)
-                futu_inv_phys = test_set.inverse_transform(futu_inv_flat).reshape(n_meta, k_meta, p_len, f_len).astype(np.float32)
+                # 恢复物理量纲（inverse_transform）— 由于 test_set 已删除，使用 Z-score 反归一化
+                # 直接用 inverse_revin 的结果（已在 TSLib 空间），不需要再 inverse_transform
+                hist_inv_phys = hist_inv.reshape(n_meta, k_meta, s_len, f_len).astype(np.float32)
+                futu_inv_phys = futu_inv.reshape(n_meta, k_meta, p_len, f_len).astype(np.float32)
 
                 np.savez(meta_file, topk_histories=hist_inv_phys, topk_futures=futu_inv_phys, topk_weights=weights)
                 log.info(f"[{model_name}] Retrieval meta denormalized: hist={hist_inv_phys.shape}, fut={futu_inv_phys.shape}")
@@ -446,18 +462,6 @@ def run_single_experiment(config: Dict[str, Any]) -> Dict[str, Any]:
                 import traceback
                 log.error(f"[{model_name}] Meta denorm failed: {e}")
                 log.debug(traceback.format_exc())
-
-        del test_set, Y_pred_flat, Y_test_flat
-        gc.collect()
-
-        preview_hist_list = history_preview_raw.reshape(
-            MAX_PREVIEW, seq_len * n_feat
-        ).tolist()
-        preview_pred = Y_pred_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-        preview_true = Y_test_inv[:MAX_PREVIEW].reshape(MAX_PREVIEW, -1).tolist()
-
-        del Y_pred, Y_pred_inv, Y_test_inv
-        gc.collect()
 
         # 保存 params.json
         params_out = {

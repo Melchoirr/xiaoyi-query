@@ -883,47 +883,61 @@ def generate_all_plots(run_dir: str):
     except Exception as e:
         print(f"[plotting] Failed to scan experiment directories: {e}")
 
+    # 4. 生成顶会级多通道对比网格图 (v4.3)
+    try:
+        plot_cross_model_comparison(
+            run_dir,
+            sample_indices=None,  # 默认 [0, N//2, N-1]
+            dpi=300
+        )
+        print("[plotting] Paper-level comparison plot generated!")
+    except Exception as e:
+        print(f"[plotting] Failed to generate paper-level comparison: {e}")
+
     print("[plotting] All plots generation completed.")
 
 
 def plot_cross_model_comparison(
     run_dir: str,
-    sample_id: int = 0,
+    sample_indices: list = None,
     feat_idx: int = -1,
     save_path: Optional[str] = None,
-    figsize: tuple = (16, 10),
+    figsize: tuple = None,
     dpi: int = 300
 ):
     """
-    跨模型对比大图 - Conference-Level Analysis (v4.1 新增/修复)
+    顶会级多通道对比网格图 (v4.3: 重写)
 
-    功能：
-    1. 遍历 run_dir 下所有以 ETTm1_ 开头的实验子文件夹
-    2. 读取各自的 preds.npy，以及统一的 X_test.npy 和 trues.npy
-    3. 绘制一张大图：左侧 Test Input（黑色实线），右侧 Ground Truth（黑色粗虚线）
-    4. 将所有模型的预测结果画在右侧，使用高对比度颜色（tab: 系列）
-    5. 保存为 run_dir/cross_model_sample{sample_id}.png
+    布局：
+    - 行数 = 通道数（n_features，例如 7）
+    - 列数 = 代表性样本数（默认 [0, N_test // 2, N_test - 1]）
+    - figsize = (6 * n_cols, 2.5 * n_features)
+
+    配色：
+    - 历史输入 (X_test): #aaaaaa, linewidth=0.8, alpha=0.7
+    - 真实值 (Ground Truth): #333333, linewidth=0.5
+    - 各个模型 (preds): matplotlib 默认颜色循环, linewidth=0.3, alpha=0.85
+    - x=seq_len 处画 #cccccc 垂直虚线分割过去与未来
+
+    保存：run_dir/paper_level_comparison.png, dpi=300, bbox_inches='tight'
 
     Args:
         run_dir: 实验运行目录
-        sample_id: 绘制第几个测试样本（从 0 开始）
-        feat_idx: 绘制哪个特征维度（默认 -1 = 目标特征）
+        sample_indices: 采样的测试样本索引列表，默认 [0, N//2, N-1]
+        feat_idx: 绘制哪个特征维度（默认 -1 = 所有通道）
         save_path: 保存路径
         figsize: 图形大小
         dpi: 分辨率
     """
     if not _HAS_MATPLOTLIB:
-        print("[plotting] matplotlib not installed, skipping cross-model comparison.")
+        print("[plotting] matplotlib not installed, skipping paper-level comparison.")
         return
 
-    # 扫描所有以 ETTm1_ 开头的实验目录
+    # ── 1. 收集所有实验目录 ────────────────────────────────────────
     exp_dirs = []
     for item in os.listdir(run_dir):
         exp_path = os.path.join(run_dir, item)
         if not os.path.isdir(exp_path):
-            continue
-        # 只扫描以 ETTm1_ 开头的文件夹
-        if not item.startswith('ETTm1_'):
             continue
         preds_path = os.path.join(exp_path, 'preds.npy')
         if os.path.exists(preds_path):
@@ -934,173 +948,209 @@ def plot_cross_model_comparison(
             })
 
     if len(exp_dirs) == 0:
-        print(f"[plotting] No experiment directories with preds.npy found in {run_dir}")
+        print(f"[plotting] No experiment directories found in {run_dir}")
         return
 
-    # 加载参考数据（使用第一个实验的 X_test 和 trues）
+    # ── 2. 加载共享的参考数据 ──────────────────────────────────────
     ref_exp = exp_dirs[0]
     x_test_path = os.path.join(ref_exp['path'], 'X_test.npy')
     trues_path = os.path.join(ref_exp['path'], 'trues.npy')
     params_path = os.path.join(ref_exp['path'], 'params.json')
 
-    if not os.path.exists(x_test_path) or not os.path.exists(trues_path):
-        print(f"[plotting] Reference data not found in {ref_exp['path']}")
+    if not (os.path.exists(x_test_path) and os.path.exists(trues_path)):
+        print(f"[plotting] Reference data (X_test.npy/trues.npy) not found.")
         return
 
     try:
-        x_test = np.load(x_test_path)
-        trues = np.load(trues_path)
-        seq_len = int(np.load(x_test_path).shape[1] / 7)  # 估算 seq_len
-        pred_len = trues.shape[1]
-        n_features = 7  # ETT 数据集默认 7 特征
+        X_test = np.load(x_test_path)      # shape: (N_test, seq_len * n_feat) 或 (N_test, seq_len, n_feat)
+        trues = np.load(trues_path)         # shape: (N_test, pred_len * n_feat) 或 (N_test, pred_len, n_feat)
+        seq_len = 96
+        pred_len = trues.shape[1] if trues.ndim == 2 else trues.shape[1]
+        n_features = 7
     except Exception as e:
         print(f"[plotting] Failed to load reference data: {e}")
         return
 
     # 从 params.json 读取配置
-    try:
-        with open(params_path, 'r') as f:
-            params = json.load(f)
-            seq_len = params.get('seq_len', seq_len)
-            pred_len = params.get('pred_len', pred_len)
-            n_features = params.get('n_features', n_features)
-    except Exception:
-        pass
+    if os.path.exists(params_path):
+        try:
+            with open(params_path, 'r') as f:
+                p = json.load(f)
+                seq_len = p.get('seq_len', seq_len)
+                pred_len = p.get('pred_len', pred_len)
+                n_features = p.get('n_features', n_features)
+        except Exception:
+            pass
 
-    # 处理特征索引
-    if feat_idx < 0:
-        feat_idx = n_features - 1
-    feat_idx = min(feat_idx, n_features - 1)
-    feat_label = _get_feature_label(feat_idx, n_features)
-
-    # 加载所有模型的预测结果
+    # ── 3. 加载所有模型的预测 ────────────────────────────────────
     model_preds = []
     model_names = []
 
     for exp in exp_dirs:
         try:
             preds = np.load(exp['preds_path'])
-            # 尝试读取模型名称
             p_path = os.path.join(exp['path'], 'params.json')
             if os.path.exists(p_path):
                 with open(p_path, 'r') as f:
-                    p = json.load(f)
-                    model_name = p.get('model_name', exp['exp_id'])
+                    pj = json.load(f)
+                    model_name = pj.get('model_name', exp['exp_id'])
             else:
                 model_name = exp['exp_id']
-
             model_preds.append(preds)
             model_names.append(model_name)
         except Exception as e:
-            print(f"[plotting] Failed to load predictions from {exp['path']}: {e}")
+            print(f"[plotting] Failed to load {exp['path']}: {e}")
 
-    if len(model_preds) == 0:
-        print("[plotting] No valid predictions loaded.")
+    if not model_preds:
+        print("[plotting] No valid model predictions loaded.")
         return
 
-    # 提取样本数据
-    if sample_id >= x_test.shape[0]:
-        sample_id = 0
-    if sample_id >= trues.shape[0]:
-        sample_id = 0
-
-    # 提取历史序列
-    if x_test.ndim == 2:
-        per_feat = x_test.shape[1] // n_features
-        test_input = x_test[sample_id, feat_idx * per_feat:(feat_idx + 1) * per_feat]
-        if len(test_input) > seq_len:
-            test_input = test_input[:seq_len]
-        elif len(test_input) < seq_len:
-            test_input = np.pad(test_input, (0, seq_len - len(test_input)), mode='edge')
+    # ── 4. 确定采样样本 ──────────────────────────────────────────
+    N_test = X_test.shape[0]
+    if sample_indices is None:
+        sample_indices = [0, N_test // 2, N_test - 1]
     else:
-        test_input = x_test[sample_id, :, feat_idx] if x_test.ndim == 3 else x_test[sample_id, :]
+        sample_indices = [min(i, N_test - 1) for i in sample_indices]
+    n_cols = len(sample_indices)
 
-    # 提取 Ground Truth
-    if trues.ndim == 3:
-        gt_future = trues[sample_id, :, feat_idx]
+    # ── 5. 自动计算画布尺寸 ──────────────────────────────────────
+    if figsize is None:
+        fig_w = 6 * n_cols
+        fig_h = 2.5 * n_features
+        figsize = (fig_w, fig_h)
+
+    # ── 6. 处理多通道数据 ─────────────────────────────────────────
+    # X_test 和 trues 可能是 (N, seq_len*n_feat) 或 (N, seq_len, n_feat)
+    if X_test.ndim == 2:
+        per_feat = X_test.shape[1] // n_features
+        X_test_3d = X_test.reshape(N_test, seq_len, n_features) if per_feat == seq_len else X_test.reshape(N_test, per_feat, n_features)
+        if X_test_3d.shape[1] != seq_len:
+            X_test_3d = X_test.reshape(N_test, seq_len, n_features)
     else:
-        gt_future = trues[sample_id, :] if trues.ndim == 2 else trues[sample_id]
+        X_test_3d = X_test
 
-    # 提取各模型预测
-    pred_futures = []
+    if trues.ndim == 2:
+        per_feat = trues.shape[1] // n_features
+        trues_3d = trues.reshape(N_test, pred_len, n_features) if per_feat == pred_len else trues.reshape(N_test, per_feat, n_features)
+        if trues_3d.shape[1] != pred_len:
+            trues_3d = trues.reshape(N_test, pred_len, n_features)
+    else:
+        trues_3d = trues
+
+    # 处理 preds 维度
+    preds_3d_list = []
     for preds in model_preds:
-        if preds.ndim == 3:
-            pred_fut = preds[sample_id, :, feat_idx]
+        if preds.ndim == 2:
+            per_feat = preds.shape[1] // n_features
+            p3d = preds.reshape(N_test, pred_len, n_features) if per_feat == pred_len else preds.reshape(N_test, per_feat, n_features)
+            if p3d.shape[1] != pred_len:
+                p3d = preds.reshape(N_test, pred_len, n_features)
+            preds_3d_list.append(p3d)
         else:
-            pred_fut = preds[sample_id, :] if preds.ndim == 2 else preds[sample_id]
-        pred_futures.append(pred_fut)
+            preds_3d_list.append(preds)
 
-    # 高对比度颜色列表（matplotlib tab: 系列）
-    colors = [
-        'tab:red',    # 红色
-        'tab:blue',   # 蓝色
-        'tab:green',  # 绿色
-        'tab:orange', # 橙色
-        'tab:purple', # 紫色
-        'tab:brown',  # 棕色
-        'tab:pink',   # 粉色
-        'tab:gray',   # 灰色
-        'tab:olive',  # 橄榄色
-        'tab:cyan',   # 青色
-    ]
-
-    # 创建图形
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # X 轴坐标
-    x_past = np.arange(-seq_len, 0)
-    x_future = np.arange(0, pred_len)
-
-    # ── 左侧：Test Input（黑色实线，去糊）─────────────────────────────
-    ax.plot(x_past, test_input, color='#2c3e50', linewidth=3.0, alpha=1.0,
-           marker='None', label='Test Input (History)', zorder=10)
-
-    # ── 右侧：Ground Truth（黑色粗虚线，去糊）──────────────────────────
-    ax.plot(x_future, gt_future, color='#000000', linewidth=3.5, alpha=1.0,
-           linestyle='--', marker='None', label='Ground Truth', zorder=9)
-
-    # ── 绘制各模型预测（高对比度颜色，去糊）────────────────────────────
-    for i, (pred_fut, model_name) in enumerate(zip(pred_futures, model_names)):
-        color = colors[i % len(colors)]
-        # 简化模型名称显示
-        short_name = model_name.replace('Search', '').replace('_', ' ')
-        ax.plot(x_future, pred_fut, color=color, linewidth=2.0, alpha=0.85,
-               marker='None', label=short_name, zorder=5 + i)
-
-    # ── X=0 分隔线 ──────────────────────────────────────────────────
-    ax.axvline(x=0, color='#7f8c8d', linestyle='-', linewidth=2, zorder=8)
-
-    # ── 区域填充 ────────────────────────────────────────────────────
-    ax.axvspan(-seq_len - 0.5, -0.5, alpha=0.08, color='blue', zorder=0)
-    ax.axvspan(-0.5, pred_len - 0.5, alpha=0.08, color='green', zorder=0)
-
-    # ── 设置坐标轴 ──────────────────────────────────────────────────
-    ax.set_xlim(-seq_len - 2, pred_len + 2)
-    ax.set_xlabel('Time Offset (0 = Prediction Start)', fontsize=12)
-    ax.set_ylabel(feat_label, fontsize=12)
-    ax.tick_params(labelsize=10)
-    ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.5)
-
-    # ── 标题 ────────────────────────────────────────────────────────
-    ax.set_title(
-        f'Cross-Model Prediction Comparison (Sample {sample_id})\n'
-        f'Left: Test Input (Black) | Right: Ground Truth (Black Dashed) & Predictions (Colors)',
-        fontsize=13, fontweight='bold'
+    # ── 7. 绘制网格图 ─────────────────────────────────────────────
+    fig, axes = plt.subplots(
+        nrows=n_features,
+        ncols=n_cols,
+        figsize=figsize,
+        squeeze=False,
+        constrained_layout=False
     )
 
-    # ── 图例 ────────────────────────────────────────────────────────
-    ax.legend(loc='upper left', fontsize=9, framealpha=0.95,
-             ncol=2, bbox_to_anchor=(0.01, 0.99))
+    # matplotlib 默认颜色循环（高对比度）
+    prop_cycle = plt.rcParams['axes.prop_cycle']
+    default_colors = prop_cycle.by_key()['color']
 
-    plt.tight_layout()
+    for row_feat in range(n_features):
+        feat_label = _get_feature_label(row_feat, n_features)
 
-    # ── 保存 ────────────────────────────────────────────────────────
+        for col_sample, sample_id in enumerate(sample_indices):
+            ax = axes[row_feat, col_sample]
+
+            # ── X_test 历史（#aaaaaa, linewidth=0.8, alpha=0.7）────────────
+            test_input = X_test_3d[sample_id, :, row_feat] if X_test_3d.ndim == 3 else X_test_3d[sample_id]
+            ax.plot(
+                np.arange(-seq_len, 0),
+                test_input,
+                color='#aaaaaa', linewidth=0.8, alpha=0.7,
+                zorder=1
+            )
+
+            # ── Ground Truth（#333333, linewidth=0.5）──────────────────
+            gt_future = trues_3d[sample_id, :, row_feat] if trues_3d.ndim == 3 else trues_3d[sample_id]
+            ax.plot(
+                np.arange(0, pred_len),
+                gt_future,
+                color='#333333', linewidth=0.5,
+                zorder=2
+            )
+
+            # ── 各模型预测（默认颜色循环, linewidth=0.3, alpha=0.85）────
+            for model_idx, (p3d, model_name) in enumerate(zip(preds_3d_list, model_names)):
+                pred_fut = p3d[sample_id, :, row_feat] if p3d.ndim == 3 else p3d[sample_id]
+                color = default_colors[model_idx % len(default_colors)]
+                ax.plot(
+                    np.arange(0, pred_len),
+                    pred_fut,
+                    color=color, linewidth=0.3, alpha=0.85,
+                    zorder=3 + model_idx
+                )
+
+            # ── x = seq_len 垂直虚线分割线 ─────────────────────────
+            ax.axvline(
+                x=0,
+                color='#cccccc', linestyle='--', linewidth=0.8,
+                zorder=0
+            )
+
+            # ── 子图装饰 ───────────────────────────────────────────
+            if col_sample == 0:
+                ax.set_ylabel(feat_label, fontsize=6)
+            if row_feat == 0:
+                ax.set_title(f'Sample {sample_id}', fontsize=7, fontweight='bold')
+            if row_feat == n_features - 1:
+                ax.set_xlabel('Time', fontsize=6)
+
+            ax.tick_params(labelsize=5)
+            ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.3)
+
+    # ── 统一图例 ─────────────────────────────────────────────────
+    handles = [
+        Patch(facecolor='#aaaaaa', label='X_test (History)'),
+        Patch(facecolor='#333333', label='Ground Truth'),
+    ]
+    for mi, mn in enumerate(model_names):
+        short = mn.replace('Search', '').replace('_', ' ')
+        color = default_colors[mi % len(default_colors)]
+        handles.append(Patch(facecolor=color, label=short))
+
+    fig.legend(
+        handles=handles,
+        loc='lower right',
+        bbox_to_anchor=(0.99, 0.01),
+        fontsize=7,
+        framealpha=0.9,
+        edgecolor='gray',
+        ncol=min(4, len(handles)),
+    )
+
+    # ── 整体标题 ────────────────────────────────────────────────
+    fig.suptitle(
+        'Cross-Model Multi-Channel Comparison\n'
+        f'Samples: {sample_indices} | Physical Scale',
+        fontsize=11, fontweight='bold', y=0.99
+    )
+
+    plt.tight_layout(rect=[0, 0.06, 1, 0.97])
+
+    # ── 保存 ────────────────────────────────────────────────────
     if save_path is None:
-        save_path = os.path.join(run_dir, f'cross_model_sample{sample_id}.png')
+        save_path = os.path.join(run_dir, 'paper_level_comparison.png')
 
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
     fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white', edgecolor='none')
-    print(f"[plotting] Cross-model comparison saved: {save_path}")
+    print(f"[plotting] Paper-level comparison saved: {save_path}")
 
     plt.close(fig)
 

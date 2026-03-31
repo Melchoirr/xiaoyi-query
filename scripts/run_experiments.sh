@@ -705,16 +705,7 @@ try:
     from plotting import generate_all_plots, plot_cross_model_comparison
     print(f"[Plotting] Generating all plots for: {run_dir}")
     generate_all_plots(run_dir)
-    print("[Plotting] Super matrix and retrieval plots generated successfully!")
-
-    # 生成前 3 个样本的跨模型对比图
-    print("[Plotting] Generating cross-model comparison plots...")
-    for sample_id in range(3):
-        try:
-            plot_cross_model_comparison(run_dir, sample_id=sample_id, feat_idx=-1)
-            print(f"[Plotting] Cross-model comparison for sample {sample_id} generated!")
-        except Exception as e:
-            print(f"[Plotting] Failed to generate cross-model plot for sample {sample_id}: {e}")
+    print("[Plotting] Super matrix, retrieval plots, and paper-level comparison generated!")
 
 except ImportError as e:
     print(f"[Plotting] Import error: {e}")
@@ -734,7 +725,7 @@ PYEOF
     echo "  Summary CSV:   $GLOBAL_RUN_DIR/summary_metrics.csv"
     echo "  Super Matrix:  $GLOBAL_RUN_DIR/super_comparison_matrix.png"
     echo "  Model Ranking: $GLOBAL_RUN_DIR/model_ranking_bar.png"
-    echo "  Cross-Model:   $GLOBAL_RUN_DIR/cross_model_comparison_sample*.png"
+    echo "  Cross-Model:   $GLOBAL_RUN_DIR/paper_level_comparison.png"
     echo "  Logs:          $GLOBAL_RUN_DIR/logs/"
     echo "================================================================================"
 fi

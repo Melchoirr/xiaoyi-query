@@ -1,4 +1,4 @@
-# 时序预测基线系统 (v4.1 大道至简重构版)
+# 时序预测基线系统 (v4.3 大道至简重构版)
 
 七种检索算法，基于记忆库 / 向量索引 / 深度学习的时序预测框架。
 
@@ -12,17 +12,16 @@
 | TS2VecSearch | 深度表示 | Dilated CNN 对比学习 + faiss |
 | RAGSearch | 端到端 | Siamese Cross-Attention |
 
-## 核心变更 (v4.1 Bug 修复与功能增强)
+## 核心变更 (v4.3 指标计算修复 & 顶会级多通道网格图)
 
-本次更新修复了三个底层维度的 Bug，并新增了顶会级"跨模型对比"绘图功能：
+本次更新修复了指标计算的尺度错位 Bug，并重写了顶会级多通道对比网格图：
 
-1. **Bug Fix 1 - Shell `--models all` 展开**：修复 Bash 脚本中 `all` 无法正确展开为 7 个模型的 Bug
-2. **Bug Fix 2 - RevIN 广播崩溃**：修复 `axis=-1` 导致的张量形状不匹配问题，改为 `axis=(1, 2)` 确保统计量可广播到任意形状
-3. **Bug Fix 3 - 溯源元数量纲**：修复 `retrieval_meta.npz` 停留在归一化空间的问题，新增反归一化步骤投影回物理尺度
-4. **功能增强 - 跨模型对比图**：新增 `plot_cross_model_comparison()` 函数，自动生成多模型同屏对比大图
-5. **去雾化优化**：移除所有图表中的 `marker` 参数，提高 DPI 至 300，确保线条平滑清晰
+1. **Bug Fix 1 - 指标计算空间错位**：修复 `metrics` 在归一化空间计算的问题，改为先执行 `inverse_revin` 回到 TSLib 空间再计算 Metric，确保 MAE/MSE 反映真实物理尺度
+2. **Bug Fix 2 - X_test 量纲漏失**：修复 `X_test.npy` 未执行物理尺度恢复的问题，新增 `test_set.inverse_transform` 确保所有保存的 npy 文件均为物理尺度
+3. **功能增强 - 顶会级多通道网格图**：重写 `plot_cross_model_comparison()`，生成 `n_features × n_samples` 的大网格图，布局为 `figsize=(6*n_cols, 2.5*n_features)`，统一保存为 `paper_level_comparison.png`
+4. **布局优化**：历史输入 `#aaaaaa`/linewidth=0.8/alpha=0.7，真实值 `#333333`/linewidth=0.5，各模型默认颜色循环/linewidth=0.3/alpha=0.85，`x=0` 处 `#cccccc` 虚线分割，dpi=300
 
-## v4.0/v4.1 架构设计
+## v4.0/v4.3 架构设计
 
 ```bash
 # 核心依赖
@@ -138,6 +137,7 @@ results/
     ├── summary_metrics.csv        # 所有实验汇总
     ├── super_comparison_matrix.png # 顶会级对比热力图
     ├── model_ranking_bar.png      # 模型排名柱状图
+    ├── paper_level_comparison.png  # 顶会级多通道网格图（v4.3）
     ├── cross_model_comparison_sample0.png  # 跨模型对比图（样本0）
     ├── cross_model_comparison_sample1.png  # 跨模型对比图（样本1）
     ├── cross_model_comparison_sample2.png  # 跨模型对比图（样本2）
@@ -177,6 +177,7 @@ results/
 
 | 版本 | 更新内容 |
 |------|---------|
+| **v4.3** | 修复指标计算尺度错位（Metrics 须在 TSLib 空间计算）；修复 X_test.npy 漏失物理尺度恢复；重写顶会级多通道网格图（n_features × n_samples，figsize=(6*n_cols, 2.5*n_features)，统一保存 paper_level_comparison.png） |
 | **v4.2** | 优化绘图视觉：自动计算画布尺寸，增粗线条(D=2.0,GT=2.0)，固定DPI=300；DTWSearch GPU OOM重试机制：`_gpu_retry_with_sleep`自动排队等待，最多重试30次渐进等待 |
 | **v4.1** | 修复 Shell `--models all` Bug；修复 RevIN Feature 维度广播崩溃（axis=(1,2)）；修复溯源元数据量纲错位（反归一化回物理尺度）；新增跨模型对比图；去雾化（移除 marker，DPI=300） |
 | **v4.0** | 大道至简重构：删除 Python 参数网格，Shell 全权调度；新增溯源证据输出和顶会级可视化 |
