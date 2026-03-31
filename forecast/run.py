@@ -1,4 +1,5 @@
 import argparse
+import os
 from forecast.exp.exp_long_term_forecasting import Exp_Long_Term_Forecast
 
 
@@ -6,11 +7,14 @@ def main():
     parser = argparse.ArgumentParser(description='Time Series Forecasting')
 
     # basic config
-    parser.add_argument('--mode', type=str, default='single', choices=['single', 'fusion'],
-                        help='single: 单模型训练/测试; fusion: XGBoost 融合')
+    parser.add_argument('--mode', type=str, default='single',
+                        choices=['single', 'fusion', 'cosine_match', 'plot'],
+                        help='single: 单模型训练/测试; fusion: XGBoost 融合; '
+                             'cosine_match: MSE匹配基线; plot: 融合对比图')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST'])
+                        choices=['DLinear', 'PatchTST'],
+                        help='single 模式下的模型选择')
     parser.add_argument('--fusion_models', type=str,
                         default='DLinear,PatchTST',
                         help='fusion 模式下参与融合的模型，逗号分隔')
@@ -18,6 +22,22 @@ def main():
                         help='测试后额外保存 val 集预测（供 fusion 使用）')
     parser.add_argument('--save_train_pred', action='store_true', default=False,
                         help='测试后额外保存 train 集预测（供 fusion 使用）')
+
+    # cosine_match / plot 模式参数
+    parser.add_argument('--flags', type=str, default='test,train,val',
+                        help='cosine_match 模式: 逗号分隔的集合 (test,train,val)')
+    parser.add_argument('--plot_models', type=str, default='DLinear,PatchTST',
+                        help='plot 模式: 参与对比的基础模型名')
+    parser.add_argument('--plot_fusion_model', type=str, default='XGBFusion',
+                        help='plot 模式: 融合模型名')
+    parser.add_argument('--plot_output', type=str, default=None,
+                        help='plot 模式: 输出图片路径')
+    parser.add_argument('--n_samples', type=int, default=3,
+                        help='cosine_match 模式: 绘图样本数')
+    parser.add_argument('--top_k', type=int, default=10,
+                        help='cosine_match 模式: top-k 匹配展示')
+    parser.add_argument('--do_plot', action='store_true', default=False,
+                        help='cosine_match 模式: 是否绘图')
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1')
@@ -94,7 +114,46 @@ def main():
 
     setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
 
-    if args.mode == 'fusion':
+    if args.mode == 'cosine_match':
+        import sys
+        sys.argv = [
+            'cosine_match',
+            '--root_path', args.root_path,
+            '--seq_len', str(args.seq_len),
+            '--pred_len', str(args.pred_len),
+            '--flags', args.flags,
+            '--n_samples', str(args.n_samples),
+            '--top_k', str(args.top_k),
+            '--output_dir', os.path.join(
+                args.result_path,
+                f'CosineMatch_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'),
+        ]
+        if args.do_plot:
+            sys.argv.append('--plot')
+
+        from forecast.models.CosineMatch import main as cosine_main
+        cosine_main()
+
+    elif args.mode == 'plot':
+        import sys
+        sys.argv = [
+            'plot_fusion',
+            '--seq_len', str(args.seq_len),
+            '--pred_len', str(args.pred_len),
+            '--data', args.data,
+            '--features', args.features,
+            '--models', args.plot_models,
+            '--fusion_model', args.plot_fusion_model,
+            '--result_path', args.result_path,
+            '--raw_path', os.path.join(args.root_path, f'{args.data}.csv'),
+        ]
+        if args.plot_output:
+            sys.argv += ['--output', args.plot_output]
+
+        from forecast.models.PlotFusion import main as plot_main
+        plot_main()
+
+    elif args.mode == 'fusion':
         from forecast.fusion.stacking import XGBStacking
         setting_template = f'{{model}}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
         model_names = [m.strip() for m in args.fusion_models.split(',')]

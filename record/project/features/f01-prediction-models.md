@@ -11,7 +11,9 @@
   - `forecast/models/Timer.py` — Model 类，THU Timer zero-shot 推理
   - `forecast/models/TimesFM.py` — Model 类，Google TimesFM zero-shot 推理
   - `forecast/layers/Embed.py:22` — PatchEmbedding（Patch 切分 + 投影 + 位置编码）
-- **功能描述**：六个不同范式的时序预测模型。可训练模型：DLinear（趋势-季节分解+线性映射）、PatchTST（Patch+TransformerEncoder）。基础模型 zero-shot：Sundial（HF pipeline）、Chronos（Amazon chronos-bolt-small）、Timer（THU timer-base-84m, AutoModelForCausalLM）、TimesFM（Google timesfm-2.0-500m）。所有模型统一输入 [B,L,C] 输出 [B,pred_len,C]，通过 exp_basic.py 的 model_dict 统一管理。
+  - `forecast/models/CosineMatch.py` — MSE最小匹配基线，从训练集检索最近邻作为预测
+  - `forecast/models/PlotFusion.py` — 多模型预测对比可视化
+- **功能描述**：多范式时序预测模型。可训练模型：DLinear（趋势-季节分解+线性映射）、PatchTST（Patch+TransformerEncoder）。基础模型 zero-shot：Sundial（HF pipeline）、Chronos（Amazon chronos-bolt-small）、Timer（THU timer-base-84m, AutoModelForCausalLM）、TimesFM（Google timesfm-2.0-500m）。非参数基线：CosineMatch（MSE最小匹配，train集使用leave-one-out避免信息泄露）。可视化：PlotFusion（多模型对比图，参数化支持任意模型组合）。所有模型统一输入 [B,L,C] 输出 [B,pred_len,C]，通过 exp_basic.py 的 model_dict 统一管理。
 - **测试方法**：
   ```bash
   python -m forecast.run --model DLinear --data ETTh1 --pred_len 96 --is_training 1 --train_epochs 1
@@ -23,6 +25,30 @@
   ```
 
 ## 变化
+
+### [修改] 2026-03-31 16:00 — CosineMatch/PlotFusion 从 scripts 迁移至 models，修复信息泄露
+
+<details><summary>详情</summary>
+
+**计划**：将 `cosine_match.py` 和 `plot_fusion.py` 从 `forecast/scripts/` 迁移到 `forecast/models/`，修复 CosineMatch 的多个 bug，并将两者集成到 `run.py` 统一入口。
+
+**代码修改**：
+- `forecast/scripts/cosine_match.py` → `forecast/models/CosineMatch.py`：
+  - **修复 train 集信息泄露**：新增 `exclude_self` 参数，当 flag='train' 时排除自身匹配（leave-one-out），避免 stacking 过拟合
+  - **修复 RESULT 打印 bug**：单独记录 test 集 metrics，不再依赖循环末尾变量
+  - 改用 `forecast.utils.metrics.metric()` 统一指标计算
+- `forecast/scripts/plot_fusion.py` → `forecast/models/PlotFusion.py`：
+  - 参数化重构：所有硬编码配置（seq_len、models、paths）改为 argparse 参数
+  - 支持任意模型组合和动态颜色分配
+- 删除 `forecast/scripts/cosine_match.py` 和 `forecast/scripts/plot_fusion.py`
+
+**测试**：
+| 方法 | 结果 | 备注 |
+|------|------|------|
+| `from forecast.models.CosineMatch import ...` | ✅ | 导入正常 |
+| `from forecast.models.PlotFusion import main` | ✅ | 导入正常 |
+
+</details>
 
 ### [实现] 2026-03-24 — 新增 Chronos/Timer/TimesFM 三个基础模型
 

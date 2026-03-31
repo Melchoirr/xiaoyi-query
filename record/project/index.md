@@ -1,6 +1,6 @@
 # xiaoyi-query (prediction-fusion) 功能索引
 
-> 最后更新：2026-03-24 (UTC+8)
+> 最后更新：2026-03-31 (UTC+8)
 
 ## 架构概览
 
@@ -25,11 +25,11 @@ CLI 入口 (run.py) + 批量脚本 (run_all.sh)
 
 | ID | 功能 | 核心文件 | 最初实现 | 最后变更 | 状态 | 维护 | 详情 |
 |----|------|----------|----------|----------|------|------|------|
-| F01 | 预测模型 | models/*.py, layers/Embed.py | 03-22 | 03-24 | ⚠️有注意事项 | 🟢在用 | [详情](features/f01-prediction-models.md) |
+| F01 | 预测模型 | models/*.py, layers/Embed.py | 03-22 | 03-31 16:00 | ⚠️有注意事项 | 🟢在用 | [详情](features/f01-prediction-models.md) |
 | F02 | 数据管道 | data_provider/*.py, utils/timefeatures.py | 03-22 | 03-22 | ✅无误 | 🟢在用 | [详情](features/f02-data-pipeline.md) |
 | F03 | 实验引擎 | exp/*.py, utils/tools.py | 03-22 | 03-24 | ⚠️有注意事项 | 🟢在用 | [详情](features/f03-experiment-engine.md) |
 | F04 | 评估指标 | utils/metrics.py | 03-22 | 03-22 | ⚠️有注意事项 | 🟢在用 | [详情](features/f04-metrics.md) |
-| F05 | CLI 与批量实验 | run.py, scripts/run_all.sh | 03-22 | 03-24 | ✅无误 | 🟢在用 | [详情](features/f05-cli-and-scripts.md) |
+| F05 | CLI 与批量实验 | run.py, scripts/run_all.sh | 03-22 | 03-31 16:00 | ✅无误 | 🟢在用 | [详情](features/f05-cli-and-scripts.md) |
 | F06 | XGBoost Stacking 融合 | fusion/stacking.py | 03-24 | 03-24 | 🔧进行中 | 🟢在用 | [详情](features/f06-xgb-fusion.md) |
 
 ### 状态图例

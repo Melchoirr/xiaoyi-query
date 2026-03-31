@@ -53,18 +53,32 @@ mkdir -p "$LOG_DIR"
 
 # Zero-shot foundation models (串行，避免显存冲突)
 # 使用 benchmark.py 统一入口，支持 train/val/test 三种 flag
-SCRIPT_DIR="$(dirname "$0")"
-for model in chronos timerxl sundial moirai; do
-    for data in $DATASETS; do
-        for pl in $PRED_LENS; do
-            logfile="${LOG_DIR}/${model}_${data}_${FEATURES}_sl${SEQ_LEN}_pl${pl}.log"
-            echo ">> 启动 ${model} ${data} pl${pl} -> $logfile"
-            python -u "${SCRIPT_DIR}/benchmark.py" \
-                --model $model --dataset $data --pred_len $pl \
-                --seq_len $SEQ_LEN --features $FEATURES \
-                --flags test,val,train \
-                2>&1 | tee "$logfile"
-        done
+# SCRIPT_DIR="$(dirname "$0")"
+# for model in chronos timerxl sundial moirai; do
+#     for data in $DATASETS; do
+#         for pl in $PRED_LENS; do
+#             logfile="${LOG_DIR}/${model}_${data}_${FEATURES}_sl${SEQ_LEN}_pl${pl}.log"
+#             echo ">> 启动 ${model} ${data} pl${pl} -> $logfile"
+#             python -u "${SCRIPT_DIR}/benchmark.py" \
+#                 --model $model --dataset $data --pred_len $pl \
+#                 --seq_len $SEQ_LEN --features $FEATURES \
+#                 --flags test,val,train \
+#                 2>&1 | tee "$logfile"
+#         done
+#     done
+# done
+
+# CosineMatch baseline
+for data in $DATASETS; do
+    for pl in $PRED_LENS; do
+        setting="CosineMatch_${data}_${FEATURES}_sl${SEQ_LEN}_pl${pl}"
+        logfile="${LOG_DIR}/${setting}.log"
+        echo ">> 启动 $setting -> $logfile"
+        python -u -m forecast.run \
+            --mode cosine_match --data $data --features $FEATURES \
+            --seq_len $SEQ_LEN --pred_len $pl \
+            --flags test,train,val \
+            2>&1 | tee "$logfile"
     done
 done
 
@@ -82,5 +96,14 @@ for data in $DATASETS; do
             2>&1 | tee "$logfile"
     done
 done
+
+# 绘制融合对比图
+echo ">> 绘制融合对比图"
+python -u -m forecast.run \
+    --mode plot --data ETTh1 --features $FEATURES \
+    --seq_len $SEQ_LEN --pred_len 96 \
+    --plot_models "DLinear,PatchTST" \
+    --plot_fusion_model XGBFusion \
+    2>&1 | tee "${LOG_DIR}/plot_fusion.log"
 
 echo "All experiments done! Logs saved to $LOG_DIR/"

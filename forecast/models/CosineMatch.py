@@ -2,6 +2,8 @@
 MSE最小匹配预测：
 对目标集每个序列，在训练集中找MSE最小的历史序列，用其后续pred_len作为预测。
 支持 --flags train,val,test 生成多集合预测，兼容 fusion stacking 目录结构。
+
+train 集使用 leave-one-out：排除自身匹配，避免信息泄露。
 """
 
 import argparse
@@ -10,6 +12,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 import os
+
+from forecast.utils.metrics import metric
 
 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -46,8 +50,13 @@ def build_sequences(data, seq_len, pred_len):
     return seqs, preds
 
 
-def match_sequences(target_seqs, train_seqs, train_preds):
-    """对target_seqs中每个序列，在train_seqs中找MSE最小的，返回对应的train_preds"""
+def match_sequences(target_seqs, train_seqs, train_preds, exclude_self=False):
+    """对target_seqs中每个序列，在train_seqs中找MSE最小的，返回对应的train_preds。
+
+    Args:
+        exclude_self: 当 target 和 train 来自同一集合时设为 True，
+                      排除自身匹配（leave-one-out），避免信息泄露。
+    """
     N_target = len(target_seqs)
     N_train = len(train_seqs)
     T_flat = train_seqs.reshape(N_train, -1)  # [N_train, seq_len*D]
@@ -60,6 +69,10 @@ def match_sequences(target_seqs, train_seqs, train_preds):
             print(f"  {i}/{N_target}")
         t = target_seqs[i].flatten()
         dists = np.mean((T_flat - t) ** 2, axis=1)
+
+        if exclude_self and i < N_train:
+            dists[i] = np.inf
+
         all_dists[i] = dists
         best_indices[i] = np.argmin(dists)
 
@@ -95,6 +108,8 @@ def main():
     train_seqs, train_preds = build_sequences(splits['train'], args.seq_len, args.pred_len)
     print(f"训练集序列数: {len(train_seqs)}")
 
+    test_mse, test_mae = None, None
+
     for flag in flags:
         print(f"\n{'='*40}")
         print(f"处理 {flag} 集...")
@@ -102,12 +117,16 @@ def main():
         target_seqs, target_preds = build_sequences(splits[flag], args.seq_len, args.pred_len)
         print(f"{flag} 集序列数: {len(target_seqs)}")
 
+        # train 集匹配 train 集自身时排除自身，避免信息泄露
+        exclude_self = (flag == 'train')
         matched_preds, best_indices, all_dists = match_sequences(
-            target_seqs, train_seqs, train_preds)
+            target_seqs, train_seqs, train_preds, exclude_self=exclude_self)
 
-        mse = np.mean((matched_preds - target_preds) ** 2)
-        mae = np.mean(np.abs(matched_preds - target_preds))
+        mae, mse, rmse, mape, mspe = metric(matched_preds, target_preds)
         print(f"  MSE: {mse:.6f}, MAE: {mae:.6f}")
+
+        if flag == 'test':
+            test_mse, test_mae = mse, mae
 
         # 保存：test直接存根目录，train/val存子目录
         if flag == 'test':
@@ -118,8 +137,7 @@ def main():
 
         np.save(os.path.join(save_dir, 'pred.npy'), matched_preds)
         np.save(os.path.join(save_dir, 'true.npy'), target_preds)
-        if flag == 'test':
-            np.save(os.path.join(save_dir, 'metrics.npy'), np.array([mae, mse]))
+        np.save(os.path.join(save_dir, 'metrics.npy'), np.array([mae, mse]))
         print(f"  已保存到: {save_dir}")
 
         # 绘图仅对test集
@@ -127,8 +145,10 @@ def main():
             _plot_comparison(args, target_seqs, target_preds, train_seqs, train_preds,
                              best_indices, all_dists, col_names, n_dims, mse, mae)
 
-    print(f"\nRESULT|CosineMatch_ETTh1_M_sl{args.seq_len}_pl{args.pred_len}|test|"
-          f"mse={mse:.6f}|mae={mae:.6f}")
+    # 始终打印 test 集结果
+    if test_mse is not None:
+        print(f"\nRESULT|CosineMatch_ETTh1_M_sl{args.seq_len}_pl{args.pred_len}|test|"
+              f"mse={test_mse:.6f}|mae={test_mae:.6f}")
     print("完成！")
 
 

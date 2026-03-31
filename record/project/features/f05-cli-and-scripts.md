@@ -5,8 +5,8 @@
 - **实现状态**：✅已完成
 - **核心文件**：
   - `forecast/run.py:6` — main() 函数，argparse 参数定义 + 自动推导 + 实验构建
-  - `forecast/scripts/run_all.sh:1` — 批量实验脚本（6模型 × 4数据集 × 4预测长度 + 融合）
-- **功能描述**：项目入口层。run.py 通过 argparse 管理所有配置，支持 `--mode single`（单模型训练/测试）和 `--mode fusion`（XGBoost 融合）。新增 `--fusion_models`（逗号分隔参与融合的模型名）和 `--save_val_pred`（保存 val 集预测供融合使用）。run_all.sh 批量运行全部实验组合，末尾自动执行 XGBoost 融合。
+  - `forecast/scripts/run_all.sh:1` — 批量实验脚本（多模型 + 融合 + 对比图）
+- **功能描述**：项目入口层。run.py 通过 argparse 管理所有配置，支持四种模式：`--mode single`（单模型训练/测试）、`--mode fusion`（XGBoost 融合）、`--mode cosine_match`（MSE匹配基线）、`--mode plot`（融合对比图）。run_all.sh 批量运行全部实验组合，包括 CosineMatch 基线、XGBoost 融合和对比图绘制。
 - **测试方法**：
   ```bash
   python -m forecast.run --help
@@ -15,6 +15,22 @@
   ```
 
 ## 变化
+
+### [修改] 2026-03-31 16:00 — 新增 cosine_match/plot 模式，集成迁移后的脚本
+
+<details><summary>详情</summary>
+
+**计划**：将 CosineMatch 和 PlotFusion 集成到 run.py 统一入口，更新 run_all.sh 批量脚本。
+**代码修改**：
+- `forecast/run.py`：新增 `--mode cosine_match` 和 `--mode plot` 两种模式，新增 `--flags`/`--plot_models`/`--plot_fusion_model`/`--do_plot` 等参数
+- `forecast/scripts/run_all.sh`：新增 CosineMatch 基线运行段和融合对比图绘制段
+
+**测试**：
+| 方法 | 结果 | 备注 |
+|------|------|------|
+| `python -m forecast.run --help` | ✅ | 四种 mode 正常显示 |
+
+</details>
 
 ### [修改] 2026-03-24 — 新增 fusion 模式和 save_val_pred 参数
 
