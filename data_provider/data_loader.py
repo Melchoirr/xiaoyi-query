@@ -1,272 +1,263 @@
-"""
-数据加载器模块 - 对齐 TSLib 学术规范
-严格采用固定边界切分，支持时间特征编码，返回 4 值 (seq_x, seq_y, seq_x_mark, seq_y_mark)
-内存优化：pd.read_csv 后立即 astype(float32) + del df_data + gc.collect()
-"""
-
 import os
-import gc
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset
+from sklearn.preprocessing import StandardScaler
+from utils.timefeatures import time_features
 
 
 class Dataset_ETT_hour(Dataset):
-    """
-    ETT 数据集加载器（TSLib 规范）
+    def __init__(self, root_path, flag='train', size=None,
+                 features='S', data_path='ETTh1.csv',
+                 target='OT', scale=True, timeenc=0, freq='h'):
+        if size is None:
+            self.seq_len = 96
+            self.label_len = 48
+            self.pred_len = 96
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
 
-    关键改动：
-    - 固定边界（非 ratio）：border1/2 按月份时间戳计算
-    - __getitem__ 返回 4 值：seq_x, seq_y, seq_x_mark, seq_y_mark
-    - 时间特征编码：Hour-of-Day + Day-of-Week
-    - 全程 float32 + 早 del 释放
-    """
+        assert flag in ['train', 'test', 'val']
+        type_map = {'train': 0, 'val': 1, 'test': 2}
+        self.set_type = type_map[flag]
 
-    DTYPE = np.float32
-
-    def __init__(
-        self,
-        root_path: str,
-        data_path: str,
-        flag: str = 'train',
-        seq_len: int = 96,
-        pred_len: int = 48,
-        features: str = 'M',
-        target: str = 'OT',
-        scale: bool = True
-    ):
-        assert flag in ['train', 'val', 'test']
-        assert features in ['M', 'S']
-
-        self.root_path = root_path
-        self.data_path = data_path
-        self.flag = flag
-        self.seq_len = seq_len
-        self.pred_len = pred_len
         self.features = features
         self.target = target
         self.scale = scale
+        self.timeenc = timeenc
+        self.freq = freq
 
-        # ── TSLib 固定边界（每小时 1 条，12 个月 = 12*30*24 = 8640 条/月）──
-        self.border1s = []
-        self.border2s = []
-
+        self.root_path = root_path
+        self.data_path = data_path
         self.__read_data__()
-        self.__split_data__()
 
     def __read_data__(self):
-        """读取 CSV -> 立即 float32 + del pandas 对象"""
-        full_path = os.path.join(self.root_path, self.data_path)
-
-        df_data = pd.read_csv(full_path)
-
-        # ── 时间戳编码（Hour-of-Day + Day-of-Week）──
-        # 假设第一列为 datetime 列（ETT 数据集格式）
-        if 'date' in df_data.columns[0].lower() or df_data.columns[0] == df_data.columns[0]:
-            ts_col = df_data.columns[0]
-        else:
-            ts_col = df_data.columns[0]
-
-        try:
-            timestamps = pd.to_datetime(df_data[ts_col])
-        except Exception:
-            timestamps = None
-
-        if timestamps is not None:
-            hour_of_day = timestamps.dt.hour.values.astype(self.DTYPE) / 23.0   # [0,1]
-            day_of_week = timestamps.dt.dayofweek.values.astype(self.DTYPE) / 6.0    # [0,1]
-            self.time_mark = np.stack([hour_of_day, day_of_week], axis=1)           # (N, 2)
-        else:
-            self.time_mark = np.zeros((len(df_data), 2), dtype=self.DTYPE)
-
-        # 数值列 + 立即 float32
-        cols_data = df_data.columns[1:]
-        if self.features == 'M':
-            raw = df_data[cols_data].values.astype(self.DTYPE)
-        else:
-            raw = df_data[[self.target]].values.astype(self.DTYPE)
-
-        self.n_feature = raw.shape[1]
-
-        # 标准化（StandardScaler fit 后立即降为 float32）
         self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+
+        border1s = [0, 12 * 30 * 24 - self.seq_len, 12 * 30 * 24 + 4 * 30 * 24 - self.seq_len]
+        border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+
+        if self.features == 'M' or self.features == 'MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features == 'S':
+            df_data = df_raw[[self.target]]
+
         if self.scale:
-            normalized = self.scaler.fit_transform(raw).astype(self.DTYPE)
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
         else:
-            normalized = raw
+            data = df_data.values
 
-        self.raw_data = normalized
-        self._timestamp_len = len(self.raw_data)
+        df_stamp = df_raw[['date']][border1:border2]
+        df_stamp['date'] = pd.to_datetime(df_stamp['date'])
+        if self.timeenc == 0:
+            df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
+            df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
+            df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
+            df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
+            data_stamp = df_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1:
+            data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
+            data_stamp = data_stamp.transpose(1, 0)
 
-        del raw, normalized, df_data
-        gc.collect()
+        self.data_x = data[border1:border2]
+        self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
 
-    def __split_data__(self):
-        """TSLib 固定边界：按月份时间戳切分（hourly: 12*30*24=8640 条/月）"""
-        total_len = self._timestamp_len
-        month_len = 24 * 30 * 12          # 8640 per month (hourly data)
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
 
-        # border1: 起始索引（不含 seq_len）
-        set1 = 1 * month_len - self.seq_len   # 1 month - seq_len
-        set2 = 4 * month_len - self.seq_len   # 4 months - seq_len
-        set3 = 8 * month_len - self.seq_len   # 8 months - seq_len
-        # 修正：TSLib 实际取 set3 = total_len（完整数据末尾）
-        set3 = total_len
+        seq_x = self.data_x[s_begin:s_end]
+        seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        self.border1s = [0, set1, set2]
-        self.border2s = [set1, set2, set3]
-
-        if self.flag == 'test':
-            self.border_start = self.border1s[2]
-            self.border_end = self.border2s[2]
-        elif self.flag == 'val':
-            self.border_start = self.border1s[1]
-            self.border_end = self.border2s[1]
-        else:
-            self.border_start = self.border1s[0]
-            self.border_end = self.border2s[0]
-
-        self.data_len = self.border_end - self.border_start
-        self.n_samples = max(0, self.data_len - self.seq_len - self.pred_len + 1)
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return self.n_samples
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
 
-    def __getitem__(self, index: int):
-        """返回 4 值：seq_x, seq_y, seq_x_mark, seq_y_mark（均为 float32）"""
-        if index < 0 or index >= self.n_samples:
-            raise IndexError(f"Index {index} out of range [0, {self.n_samples})")
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
 
-        start_idx = self.border_start + index
-        end_idx = start_idx + self.seq_len + self.pred_len
 
-        # 序列数据
-        seq_x = self.raw_data[start_idx:start_idx + self.seq_len]           # (seq_len, n_feat)
-        seq_y = self.raw_data[start_idx + self.seq_len:end_idx]             # (pred_len, n_feat)
-
-        # 时间标记（按月份时间索引对应位置）
-        seq_x_mark = self.time_mark[start_idx:start_idx + self.seq_len]     # (seq_len, 2)
-        seq_y_mark = self.time_mark[start_idx + self.seq_len:end_idx]      # (pred_len, 2)
-
-        return (
-            seq_x.astype(self.DTYPE),
-            seq_y.astype(self.DTYPE),
-            seq_x_mark.astype(self.DTYPE),
-            seq_y_mark.astype(self.DTYPE),
-        )
-
-    def inverse_transform(self, data: np.ndarray) -> np.ndarray:
-        """反归一化，结果保持 float32"""
-        if not self.scale:
-            return data.astype(self.DTYPE)
-
-        original_shape = data.shape
-
-        if data.ndim == 3:
-            n, T, d = data.shape
-            result_2d = self.scaler.inverse_transform(data.reshape(-1, d))
-            result = result_2d.reshape(n, T, d)
-        elif data.ndim == 2:
-            result = self.scaler.inverse_transform(data)
+class Dataset_ETT_minute(Dataset):
+    def __init__(self, root_path, flag='train', size=None,
+                 features='S', data_path='ETTm1.csv',
+                 target='OT', scale=True, timeenc=0, freq='t'):
+        if size is None:
+            self.seq_len = 96
+            self.label_len = 48
+            self.pred_len = 96
         else:
-            data_2d = data.reshape(1, -1)
-            result_2d = self.scaler.inverse_transform(data_2d)
-            result = result_2d.reshape(-1)
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
 
-        return result.astype(self.DTYPE)
+        assert flag in ['train', 'test', 'val']
+        type_map = {'train': 0, 'val': 1, 'test': 2}
+        self.set_type = type_map[flag]
+
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.timeenc = timeenc
+        self.freq = freq
+
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
+
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+
+        border1s = [0, 12 * 30 * 24 * 4 - self.seq_len, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - self.seq_len]
+        border2s = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
+        border1 = border1s[self.set_type]
+        border2 = border2s[self.set_type]
+
+        if self.features == 'M' or self.features == 'MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features == 'S':
+            df_data = df_raw[[self.target]]
+
+        if self.scale:
+            train_data = df_data[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values
+
+        df_stamp = df_raw[['date']][border1:border2]
+        df_stamp['date'] = pd.to_datetime(df_stamp['date'])
+        if self.timeenc == 0:
+            df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
+            df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
+            df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
+            df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
+            df_stamp['minute'] = df_stamp.date.apply(lambda row: row.minute, 1)
+            data_stamp = df_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1:
+            data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
+            data_stamp = data_stamp.transpose(1, 0)
+
+        self.data_x = data[border1:border2]
+        self.data_y = data[border1:border2]
+        self.data_stamp = data_stamp
+
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
 
 
-def get_data(args):
-    """
-    工厂函数：根据参数创建数据集
-    """
-    train_set = Dataset_ETT_hour(
-        root_path=args.root_path,
-        data_path=args.data_path,
-        flag='train',
-        seq_len=args.seq_len,
-        pred_len=args.pred_len,
-        features=args.features,
-        target=args.target,
-        scale=True
-    )
-
-    val_set = Dataset_ETT_hour(
-        root_path=args.root_path,
-        data_path=args.data_path,
-        flag='val',
-        seq_len=args.seq_len,
-        pred_len=args.pred_len,
-        features=args.features,
-        target=args.target,
-        scale=True
-    )
-
-    test_set = Dataset_ETT_hour(
-        root_path=args.root_path,
-        data_path=args.data_path,
-        flag='test',
-        seq_len=args.seq_len,
-        pred_len=args.pred_len,
-        features=args.features,
-        target=args.target,
-        scale=True
-    )
-
-    return train_set, val_set, test_set
+# 兼容旧接口
+Dataset_Custom = Dataset_ETT_hour
 
 
-def get_X_Y_from_dataset(dataset: Dataset_ETT_hour):
-    """
-    从数据集对象中提取 X 和 Y（忽略时间标记，适配基线模型接口）
+class Dataset_Pred(Dataset):
+    def __init__(self, root_path, data_path, flag='pred', size=None,
+                 features='S', target='OT', scale=True, timeenc=0, freq='h'):
+        if size is None:
+            self.seq_len = 96
+            self.label_len = 48
+            self.pred_len = 96
+        else:
+            self.seq_len = size[0]
+            self.label_len = size[1]
+            self.pred_len = size[2]
 
-    适配 __getitem__ 返回 4 值的解包。
-    """
-    n_samples = len(dataset)
-    seq_len = dataset.seq_len
-    n_feature = dataset.n_feature
-    pred_len = dataset.pred_len
+        assert flag in ['pred']
+        self.features = features
+        self.target = target
+        self.scale = scale
+        self.timeenc = timeenc
+        self.freq = freq
 
-    X_all = np.empty((n_samples, seq_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
-    Y_all = np.empty((n_samples, pred_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
+        self.root_path = root_path
+        self.data_path = data_path
+        self.__read_data__()
 
-    for i in range(n_samples):
-        # 解包 4 值，只取前两个
-        X, Y, _, _ = dataset[i]
-        X_all[i] = X
-        Y_all[i] = Y
+    def __read_data__(self):
+        self.scaler = StandardScaler()
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
-    dataset.raw_data = None
-    gc.collect()
+        border1 = len(df_raw) - self.seq_len
+        border2 = len(df_raw)
 
-    return X_all, Y_all
+        if self.features == 'M' or self.features == 'MS':
+            cols_data = df_raw.columns[1:]
+            df_data = df_raw[cols_data]
+        elif self.features == 'S':
+            df_data = df_raw[[self.target]]
 
+        data = df_data.values
 
-def get_X_Y_mark_from_dataset(dataset: Dataset_ETT_hour):
-    """
-    返回完整 4 元组（X, Y, X_mark, Y_mark）
-    用于需要时间特征的模型。
-    """
-    n_samples = len(dataset)
-    seq_len = dataset.seq_len
-    n_feature = dataset.n_feature
-    pred_len = dataset.pred_len
-    mark_dim = dataset.time_mark.shape[1]   # 2 (hour + weekday)
+        if self.scale:
+            self.scaler.fit(data)
+            data = self.scaler.transform(data)
 
-    X_all  = np.empty((n_samples, seq_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
-    Y_all  = np.empty((n_samples, pred_len, n_feature), dtype=Dataset_ETT_hour.DTYPE)
-    Xm_all = np.empty((n_samples, seq_len, mark_dim),  dtype=Dataset_ETT_hour.DTYPE)
-    Ym_all = np.empty((n_samples, pred_len, mark_dim),  dtype=Dataset_ETT_hour.DTYPE)
+        tmp_stamp = df_raw[['date']][border1:border2]
+        tmp_stamp['date'] = pd.to_datetime(tmp_stamp['date'])
+        if self.timeenc == 0:
+            tmp_stamp['month'] = tmp_stamp.date.apply(lambda row: row.month, 1)
+            tmp_stamp['day'] = tmp_stamp.date.apply(lambda row: row.day, 1)
+            tmp_stamp['weekday'] = tmp_stamp.date.apply(lambda row: row.weekday(), 1)
+            tmp_stamp['hour'] = tmp_stamp.date.apply(lambda row: row.hour, 1)
+            data_stamp = tmp_stamp.drop(['date'], axis=1).values
+        elif self.timeenc == 1:
+            data_stamp = time_features(pd.to_datetime(tmp_stamp['date'].values), freq=self.freq)
+            data_stamp = data_stamp.transpose(1, 0)
 
-    for i in range(n_samples):
-        X, Y, Xm, Ym = dataset[i]
-        X_all[i]  = X
-        Y_all[i]  = Y
-        Xm_all[i] = Xm
-        Ym_all[i] = Ym
+        self.data_x = data[border1:border2]
+        self.data_stamp = data_stamp
 
-    dataset.raw_data = None
-    gc.collect()
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
 
-    return X_all, Y_all, Xm_all, Ym_all
+        seq_x = self.data_x[s_begin:s_end]
+        if r_begin >= 0:
+            seq_y = self.data_x[r_begin:r_end]
+        else:
+            seq_y = np.zeros_like(seq_x)
+
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end] if r_begin >= 0 else \
+            np.zeros((self.label_len + self.pred_len, len(self.data_stamp[0])))
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.data_x) - self.seq_len + 1
+
+    def inverse_transform(self, data):
+        return self.scaler.inverse_transform(data)
