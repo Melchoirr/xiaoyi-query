@@ -35,35 +35,35 @@ pip install -r requirements.txt
 
 ```bash
 # PatternSearch (欧氏距离 KNN)
-python run.py --model PatternSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model PatternSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # LSHSearch (局部敏感哈希)
-python run.py --model LSHSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model LSHSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # SAXSearch (PAA+SAX 符号化)
-python run.py --model SAXSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model SAXSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # DTWSearch (动态时间规整)
-python run.py --model DTWSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model DTWSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # MatrixProfileSearch (GPU Z-Norm)
-python run.py --model MatrixProfileSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model MatrixProfileSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # TS2VecSearch (深度对比学习)
-python run.py --model TS2VecSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model TS2VecSearch --data ETTh1 --seq_len 96 --pred_len 96
 
 # RAGSearch (Siamese Cross-Attention)
-python run.py --model RAGSearch --data ETTh1 --seq_len 512 --pred_len 96
+python run.py --model RAGSearch --data ETTh1 --seq_len 96 --pred_len 96
 ```
 
 ### 深度学习模型使用
 
 ```bash
 # DLinear
-python run.py --model DLinear --data ETTh1 --seq_len 512 --pred_len 96 --is_training 1
+python run.py --model DLinear --data ETTh1 --seq_len 96 --pred_len 96 --is_training 1
 
 # PatchTST
-python run.py --model PatchTST --data ETTh1 --seq_len 512 --pred_len 96 --is_training 1
+python run.py --model PatchTST --data ETTh1 --seq_len 96 --pred_len 96 --is_training 1
 ```
 
 ### 模型融合
@@ -115,7 +115,7 @@ python run.py --model DTWSearch \
 python run.py --model MatrixProfileSearch \
   --top_k 5 \                   # Top-K
   --mp_normalize true \          # 是否 Z-Norm
-  --predict_chunk_size 512 \    # 预测分块大小
+  --predict_chunk_size 96 \    # 预测分块大小
   --train_chunk_size 1024       # 训练分块大小
 ```
 

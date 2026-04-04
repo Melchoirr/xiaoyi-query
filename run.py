@@ -1,15 +1,9 @@
 """
-run.py - 统一时序预测框架 (支持检索模型 + 深度学习模型)
+run.py - 统一时序预测框架 (支持7种检索模型)
 
 用法示例:
-    # 检索模型
     python run.py --model PatternSearch --data ETTh1 --seq_len 512 --pred_len 96
-
-    # 深度学习模型
-    python run.py --model DLinear --data ETTh1 --seq_len 512 --pred_len 96 --is_training 1
-
-    # 模型融合
-    python run.py --mode fusion --fusion_models PatternSearch,DLinear
+    python run.py --model LSHSearch --data ETTh1 --seq_len 512 --pred_len 96
 """
 
 import argparse
@@ -17,31 +11,17 @@ from exp.exp_long_term_forecasting import Exp_Long_Term_Forecast
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Time Series Forecasting (Unified Framework)')
+    parser = argparse.ArgumentParser(description='Time Series Forecasting (Retrieval Models)')
 
     # ========================
-    # 基本配置
+    # 模型选择（7种检索模型）
     # ========================
-    parser.add_argument('--mode', type=str, default='single', choices=['single', 'fusion'],
-                        help='single: 单模型训练/测试; fusion: XGBoost 融合')
-    parser.add_argument('--is_training', type=int, default=1, help='training or testing')
-
-    # ========================
-    # 模型选择
-    # ========================
-    RETRIEVAL_CHOICES = [
-        'PatternSearch', 'LSHSearch', 'SAXSearch', 'DTWSearch',
-        'MatrixProfileSearch', 'TS2VecSearch', 'RAGSearch'
-    ]
-    DL_CHOICES = ['DLinear', 'PatchTST']
-    ALL_MODEL_CHOICES = RETRIEVAL_CHOICES + DL_CHOICES
-
     parser.add_argument('--model', type=str, default='PatternSearch',
-                        choices=ALL_MODEL_CHOICES,
+                        choices=[
+                            'PatternSearch', 'LSHSearch', 'SAXSearch', 'DTWSearch',
+                            'MatrixProfileSearch', 'TS2VecSearch', 'RAGSearch'
+                        ],
                         help='模型选择')
-    parser.add_argument('--fusion_models', type=str,
-                        default='PatternSearch,DLinear',
-                        help='fusion 模式下参与融合的模型，逗号分隔')
 
     # ========================
     # 数据配置
@@ -50,16 +30,12 @@ def main():
     parser.add_argument('--root_path', type=str, default='./dataset/')
     parser.add_argument('--data_path', type=str, default='ETTh1.csv')
     parser.add_argument('--features', type=str, default='M',
-                        help='M: multivariate, S: univariate, MS: multivariate predict univariate')
+                        help='M: multivariate, S: univariate')
     parser.add_argument('--target', type=str, default='OT')
     parser.add_argument('--freq', type=str, default='h',
                         help='freq for time features: s/t/h/d/b/w/m')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/')
     parser.add_argument('--result_path', type=str, default='./results/')
-    parser.add_argument('--save_val_pred', action='store_true', default=False,
-                        help='测试后额外保存 val 集预测（供 fusion 使用）')
-    parser.add_argument('--save_train_pred', action='store_true', default=False,
-                        help='测试后额外保存 train 集预测（供 fusion 使用）')
 
     # ========================
     # 序列配置
@@ -72,31 +48,13 @@ def main():
     # 模型通用配置
     # ========================
     parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
-    parser.add_argument('--individual', action='store_true', default=False,
-                        help='DLinear individual channel')
-    parser.add_argument('--revin', action='store_true', default=False,
-                        help='enable Reversible Instance Normalization')
 
     # ========================
-    # 深度学习模型配置 (DLinear / PatchTST)
+    # 检索模型通用配置
     # ========================
-    parser.add_argument('--d_model', type=int, default=128)
-    parser.add_argument('--n_heads', type=int, default=8)
-    parser.add_argument('--e_layers', type=int, default=3)
-    parser.add_argument('--d_ff', type=int, default=256)
-    parser.add_argument('--patch_len', type=int, default=16)
-    parser.add_argument('--stride', type=int, default=8)
-    parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--fc_dropout', type=float, default=None,
-                        help='fully-connected dropout (default: same as --dropout)')
-    parser.add_argument('--head_dropout', type=float, default=0.0,
-                        help='prediction head dropout')
-
-    # ========================
-    # 检索模型配置
-    # ========================
-    # PatternSearch
     parser.add_argument('--top_k', type=int, default=5)
+
+    # PatternSearch
     parser.add_argument('--weighted', type=lambda x: x.lower() == 'true', default=True)
     parser.add_argument('--predict_chunk_size', type=int, default=4096)
 
@@ -140,25 +98,22 @@ def main():
     parser.add_argument('--rag_weight_decay', type=float, default=1e-4)
 
     # ========================
-    # 优化配置 (用于深度学习模型)
-    # ========================
-    parser.add_argument('--train_epochs', type=int, default=10)
-    parser.add_argument('--patience', type=int, default=3)
-    parser.add_argument('--learning_rate', type=float, default=0.001)
-    parser.add_argument('--lradj', type=str, default='type1')
-    parser.add_argument('--num_workers', type=int, default=0)
-
-    # ========================
     # GPU 配置
     # ========================
     parser.add_argument('--use_gpu', action='store_true', default=False)
     parser.add_argument('--gpu', type=int, default=0)
 
     # ========================
-    # Embedding 配置
+    # 兼容接口（检索模型需要但不使用）
     # ========================
-    parser.add_argument('--embed', type=str, default='timeF',
-                        help='time features encoding: timeF, fixed, learned')
+    parser.add_argument('--patience', type=int, default=100)  # 深度学习模型用，检索模型忽略
+    parser.add_argument('--learning_rate', type=float, default=0.001)  # 兼容接口
+
+    # ========================
+    # Embedding 配置（兼容接口）
+    # ========================
+    parser.add_argument('--embed', type=str, default='timeF')
+    parser.add_argument('--num_workers', type=int, default=0)
 
     args = parser.parse_args()
 
@@ -178,50 +133,15 @@ def main():
         if args.freq == 'h' and default_freq != 'h':
             args.freq = default_freq
 
-    # fc_dropout defaults to dropout if not specified
-    if args.fc_dropout is None:
-        args.fc_dropout = args.dropout
-
-    # ========================
-    # 参数同步：RAGSearch 参数映射
-    # ========================
-    # 将 rag_ 前缀的参数同步到主参数
-    args.d_model = args.rag_d_model      # 用于 RAGSearch
-    args.n_heads = args.rag_n_heads      # 用于 RAGSearch
-    args.epochs = args.rag_epochs        # 用于 RAGSearch
-    args.batch_size = args.rag_batch_size  # 用于 RAGSearch
-    args.lr = args.rag_lr                # 用于 RAGSearch
-    args.weight_decay = args.rag_weight_decay  # 用于 RAGSearch
-
     setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
 
-    if args.mode == 'fusion':
-        from fusion.stacking import XGBStacking
-        setting_template = f'{{model}}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
-        model_names = [m.strip() for m in args.fusion_models.split(',')]
-        stacker = XGBStacking(model_names, args.result_path, setting_template)
-        stacker.train()
-        stacker.predict_and_evaluate()
-    else:
-        exp = Exp_Long_Term_Forecast(args)
+    exp = Exp_Long_Term_Forecast(args)
 
-        if args.is_training:
-            print(f'>>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>>')
-            exp.train(setting)
+    print(f'>>>>>>>start experiment: {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+    exp.train(setting)
 
-            print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-            exp.test(setting, test=1)
-        else:
-            print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-            exp.test(setting)
-
-        if args.save_val_pred:
-            print(f'>>>>>>>saving val predictions : {setting}<<<<<<<<<<<<<<<<<<')
-            exp.test(setting, test=1, flag='val')
-
-        if args.save_train_pred:
-            print(f'>>>>>>>saving train predictions : {setting}<<<<<<<<<<<<<<<<<<')
-            exp.test(setting, test=1, flag='train')
+    print(f'>>>>>>>testing: {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
+    exp.test(setting, test=1)
 
     print('Done!')
 

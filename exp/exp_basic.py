@@ -6,7 +6,11 @@ class Exp_Basic:
     def __init__(self, args):
         self.args = args
         self.device = self._acquire_device()
-        self.model = self._build_model().to(self.device)
+        self.model = self._build_model()
+
+        # 只有 PyTorch Module 才需要 to(device)
+        if getattr(self.model, '_is_nn_module', True):
+            self.model = self.model.to(self.device)
 
     def _build_model(self):
         model = get_model(self.args)

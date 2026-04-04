@@ -43,7 +43,7 @@ results/
 result.txt
 
 # Data - keep CSV files, ignore others
-ETT_data
+dataset
 
 # Jupyter
 .ipynb_checkpoints/
