@@ -1,21 +1,51 @@
-name: Notify WPS on Push
+name: Notify WPS
 
 on:
   push:
+  issues:
+    types: [opened, closed]
+  issue_comment:
+    types: [created]
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      - name: Build message
+        id: msg
+        run: |
+          EVENT="${{ github.event_name }}"
+          ACTOR="${{ github.actor }}"
+
+          if [ "$EVENT" = "push" ]; then
+            COMMIT_MSG=$(echo '${{ github.event.head_commit.message }}' | head -1)
+            MSG="代码更新\n分支: ${{ github.ref_name }}\n提交者: ${ACTOR}\n信息: ${COMMIT_MSG}"
+          elif [ "$EVENT" = "issues" ]; then
+            ACTION="${{ github.event.action }}"
+            TITLE="${{ github.event.issue.title }}"
+            NUM="${{ github.event.issue.number }}"
+            if [ "$ACTION" = "opened" ]; then
+              MSG="新建 Issue #${NUM}\n标题: ${TITLE}\n创建者: ${ACTOR}"
+            else
+              MSG="关闭 Issue #${NUM}\n标题: ${TITLE}\n操作者: ${ACTOR}"
+            fi
+          elif [ "$EVENT" = "issue_comment" ]; then
+            TITLE="${{ github.event.issue.title }}"
+            NUM="${{ github.event.issue.number }}"
+            BODY=$(echo '${{ github.event.comment.body }}' | head -3)
+            MSG="Issue #${NUM} 新评论\n标题: ${TITLE}\n评论者: ${ACTOR}\n内容: ${BODY}"
+          fi
+
+          echo "msg=${MSG}" >> "$GITHUB_OUTPUT"
+
       - name: Send WPS Notification
         run: |
-          COMMIT_MSG=$(echo '${{ github.event.head_commit.message }}' | head -1)
           curl -s -X POST \
             "https://365.kdocs.cn/woa/api/v1/webhook/send?key=${{ secrets.WPS_WEBHOOK_KEY }}" \
             -H "Content-Type: application/json" \
             -d "{
               \"msgtype\": \"text\",
               \"text\": {
-                \"content\": \"xiaoyi-query 代码更新\n分支: ${{ github.ref_name }}\n提交者: ${{ github.actor }}\n信息: ${COMMIT_MSG}\"
+                \"content\": \"xiaoyi-query ${{ steps.msg.outputs.msg }}\"
               }
             }"
