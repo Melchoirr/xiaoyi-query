@@ -12,17 +12,17 @@
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| 原始 7 变量时序图 + train/val/test 分割线 | `forecast/scripts/plot_etth1_raw.py` | `forecast/scripts/etth1_raw_series.png` | ✅ |
-| StandardScaler 归一化后序列 | `forecast/scripts/plot_etth1_normalized.py` | `forecast/scripts/etth1_normalized_series.png` | ✅ |
-| 不同时间窗口切片特征 | `forecast/scripts/plot_etth1_slices.py` | `forecast/scripts/etth1_slices.png` + `etth1_slices/`(6 页) | ✅ |
+| 原始 7 变量时序图 + train/val/test 分割线 | `scripts/plotting/plot_etth1_raw.py` | `outputs/figures/data_analysis/etth1_raw_series.png` | ✅ |
+| StandardScaler 归一化后序列 | `scripts/plotting/plot_etth1_normalized.py` | `outputs/figures/data_analysis/etth1_normalized_series.png` | ✅ |
+| 不同时间窗口切片特征 | `scripts/plotting/plot_etth1_slices.py` | `outputs/figures/data_analysis/etth1_slices/`(6 页) | ✅ |
 
 ### 1.2 频域 / 统计分析
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| FFT / PSD 功率谱密度 | `forecast/scripts/plot_etth1_spectral.py` | `forecast/scripts/etth1_psd.png` | ✅ |
-| 变量间互相关分析 | 同上 | `forecast/scripts/etth1_xcorr.png` | ✅ |
-| 变量间交叉谱分析 | 同上 | `forecast/scripts/etth1_cross_spectral.png` | ✅ |
+| FFT / PSD 功率谱密度 | `scripts/plotting/plot_etth1_spectral.py` | `outputs/figures/data_analysis/etth1_psd.png` | ✅ |
+| 变量间互相关分析 | 同上 | `outputs/figures/data_analysis/etth1_xcorr.png` | ✅ |
+| 变量间交叉谱分析 | 同上 | `outputs/figures/data_analysis/etth1_cross_spectral.png` | ✅ |
 | SNR 信噪比分析 | — | — | ❌缺失 |
 | Lag 滞后分析 | — | — | ❌缺失 |
 
@@ -34,7 +34,7 @@
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| 7 变量 x 7 变量 DLinear 单变量预测 | `forecast/scripts/run_cross_var.sh` | `forecast/results/DLinear_ETTh1_crossvar_src{0-6}_tgt{0-6}_sl192_pl96/` | ✅ |
+| 7 变量 x 7 变量 DLinear 单变量预测 | `scripts/train/run_cross_var.sh` | `outputs/results/DLinear_ETTh1_crossvar_src{0-6}_tgt{0-6}_sl192_pl96/` | ✅ |
 
 - 模型：DLinear (enc_in=1, CI 模式)
 - 运行入口：`forecast/run.py --mode cross_var`
@@ -44,7 +44,7 @@
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| CrossVarStacking (7 source → 1 target) | `forecast/fusion/cross_var_stacking.py` | `forecast/results/CrossVarFusion_*_ETTh1_crossvar_sl192_pl96/` | ✅ |
+| CrossVarStacking (7 source → 1 target) | `forecast/fusion/cross_var_stacking.py` | `outputs/results/CrossVarFusion_*_ETTh1_crossvar_sl192_pl96/` | ✅ |
 
 - 运行入口：`forecast/run.py --mode cross_var_fusion`
 - 对每个目标变量，将 7 个 source channel 的 DLinear 预测作特征训练 XGBoost
@@ -53,7 +53,7 @@
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| ResidualStacking (self_pred + 残差学习) | `forecast/fusion/cross_var_stacking.py` | `forecast/results/ResidualFusion_*_ETTh1_crossvar_sl192_pl96/` | ✅ |
+| ResidualStacking (self_pred + 残差学习) | `forecast/fusion/cross_var_stacking.py` | `outputs/results/ResidualFusion_*_ETTh1_crossvar_sl192_pl96/` | ✅ |
 
 - 运行入口：`forecast/run.py --mode residual_fusion`
 
@@ -61,9 +61,9 @@
 
 | 内容 | 产物 | 状态 |
 |------|------|------|
-| 7x7 MSE 热力图 | `forecast/scripts/cross_var_7x7_heatmap.png` | ✅ |
-| 跨变量对比图 | `forecast/scripts/cross_var_comparison.png` | ✅ |
-| 跨变量细节图 | `forecast/scripts/cross_var_detail.png` | ✅ |
+| 7x7 MSE 热力图 | `outputs/figures/cross_var/cross_var_7x7_heatmap.png` | ✅ |
+| 跨变量对比图 | `outputs/figures/cross_var/cross_var_comparison.png` | ✅ |
+| 跨变量细节图 | `outputs/figures/cross_var/cross_var_detail.png` | ✅ |
 
 ---
 
@@ -78,7 +78,7 @@
 
 ### 3.2 零样本基础模型
 
-统一入口：`forecast/scripts/benchmark.py`
+统一入口：`scripts/benchmark/benchmark.py`
 
 | 模型 | seq_len 配置 | 状态 |
 |------|-------------|------|
@@ -97,12 +97,12 @@
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
 | 模型：K 原语码本 + Cross-Attention | `forecast/models/PrimitiveFusion.py` | — | ✅ |
-| 训练脚本 | `run_train.sh` | `forecast/results/PrimitiveFusion_ETTh1_M_sl{96,512}_pl96/` | ✅ |
-| 分析：逐通道指标 | `forecast/scripts/analyze_primitive_fusion.py` | `forecast/scripts/primitive_analysis/per_channel_mse.png` | ✅ |
-| 分析：Codebook PCA | 同上 | `forecast/scripts/primitive_analysis/codebook_pca.png` | ✅ |
-| 分析：Codebook 相似度热力图 | 同上 | `forecast/scripts/primitive_analysis/codebook_similarity.png` | ✅ |
-| 分析：原语分配热力图 | 同上 | `forecast/scripts/primitive_analysis/assignment_heatmap.png` | ✅ |
-| 分析：原语利用率 (entropy) | 同上 | `forecast/scripts/primitive_analysis/primitive_utilization.png` | ✅ |
+| 训练脚本 | `scripts/train/run_train.sh` | `outputs/results/PrimitiveFusion_ETTh1_M_sl{96,512}_pl96/` | ✅ |
+| 分析：逐通道指标 | `scripts/analysis/analyze_primitive_fusion.py` | `outputs/figures/primitive/per_channel_mse.png` | ✅ |
+| 分析：Codebook PCA | 同上 | `outputs/figures/primitive/codebook_pca.png` | ✅ |
+| 分析：Codebook 相似度热力图 | 同上 | `outputs/figures/primitive/codebook_similarity.png` | ✅ |
+| 分析：原语分配热力图 | 同上 | `outputs/figures/primitive/assignment_heatmap.png` | ✅ |
+| 分析：原语利用率 (entropy) | 同上 | `outputs/figures/primitive/primitive_utilization.png` | ✅ |
 
 **结论**：信号机制弱
 
@@ -116,7 +116,7 @@
 
 | 内容 | 代码 | 状态 |
 |------|------|------|
-| 逐维度 Top-K MSE 加权匹配 | `forecast/models/CosineMatch.py` | ✅ |
+| 逐维度 Top-K MSE 加权匹配 | `forecast/baselines/CosineMatch.py` | ✅ |
 
 - train 集使用 leave-one-out 避免信息泄露
 - 多 seq_len 实验：48 / 96 / 192 / 512
@@ -126,7 +126,7 @@
 
 | 内容 | 代码 | 状态 |
 |------|------|------|
-| DLinear/PatchTST 预测作 query，在 train 集真实未来中检索 | `forecast/models/GuidedMatch.py` | ✅ |
+| DLinear/PatchTST 预测作 query，在 train 集真实未来中检索 | `forecast/baselines/GuidedMatch.py` | ✅ |
 
 - 核心假设：更接近目标的 query 能检索到更好的邻居
 - 运行入口：`forecast/run.py --mode cosine_match --model GuidedMatch`
@@ -135,7 +135,7 @@
 
 | 内容 | 代码 | 状态 |
 |------|------|------|
-| 用真实 pred_len 在训练集 pred_len 中匹配（理论上界） | `forecast/models/PredMatch.py` | ✅ |
+| 用真实 pred_len 在训练集 pred_len 中匹配（理论上界） | `forecast/baselines/PredMatch.py` | ✅ |
 
 - 衡量"训练集中是否存在相似的未来模式"
 
@@ -143,11 +143,11 @@
 
 | 内容 | 代码 | 状态 |
 |------|------|------|
-| SeqMatch vs PredMatch 统计特征对比（均值/标准差/趋势/自相关） | `forecast/scripts/analyze_match_stats.py` | ✅ |
-| 时间周期相位对齐分析 (24h 日周期 / 168h 周周期) | `forecast/scripts/analyze_phase_alignment.py` | ✅ |
-| Top-K 匹配可视化 (7x3 子图) | `forecast/scripts/plot_cosine_topk.py` | ✅ |
-| SeqMatch vs PredMatch 对比图 | `forecast/scripts/plot_seq_vs_pred_match.py` | ✅ |
-| 逐通道指标对比 (SeqMatch/GuidedMatch/DLinear/PredMatch) | `forecast/scripts/per_channel_metrics.py` | ✅ |
+| SeqMatch vs PredMatch 统计特征对比（均值/标准差/趋势/自相关） | `scripts/analysis/analyze_match_stats.py` | ✅ |
+| 时间周期相位对齐分析 (24h 日周期 / 168h 周周期) | `scripts/analysis/analyze_phase_alignment.py` | ✅ |
+| Top-K 匹配可视化 (7x3 子图) | `scripts/plotting/plot_cosine_topk.py` | ✅ |
+| SeqMatch vs PredMatch 对比图 | `scripts/plotting/plot_seq_vs_pred_match.py` | ✅ |
+| 逐通道指标对比 (SeqMatch/GuidedMatch/DLinear/PredMatch) | `scripts/analysis/per_channel_metrics.py` | ✅ |
 
 ---
 
@@ -155,9 +155,9 @@
 
 | 内容 | 代码 | 产物 | 状态 |
 |------|------|------|------|
-| XGBStacking 融合 | `forecast/fusion/stacking.py` | `forecast/results/XGBFusion_ETTh1_M_sl{96,336}_pl96/` | ✅ |
-| 融合对比可视化 | `forecast/models/PlotFusion.py` | `forecast/results/fusion_comparison.png` | ✅ |
-| 日志解析汇总 | `forecast/scripts/parse_logs.py` | CSV 汇总表 | ✅ |
+| XGBStacking 融合 | `forecast/fusion/stacking.py` | `outputs/results/XGBFusion_ETTh1_M_sl{96,336}_pl96/` | ✅ |
+| 融合对比可视化 | `scripts/plotting/plot_fusion.py` | `outputs/results/fusion_comparison.png` | ✅ |
+| 日志解析汇总 | `scripts/analysis/parse_logs.py` | CSV 汇总表 | ✅ |
 
 - 特征：各模型的原始预测值 + horizon_idx
 - 逐通道训练独立 XGBRegressor(n_estimators=100, max_depth=4)
@@ -170,7 +170,7 @@
 
 不在仓库中记录。涉及方向：TESS, TimeXer, RLinear, 预测的生成模式, 归一化。
 
-根目录有 TESS 论文 PDF：`Li 等 - 2026 - From Text to Forecasts Bridging Modality Gap with Temporal Evolution Semantic Space.pdf`
+TESS 论文：`docs/papers/TESS_2026.pdf`
 
 ---
 
@@ -211,6 +211,6 @@
 
 | 脚本 | 内容 | 位置 |
 |------|------|------|
-| run_all.sh | DLinear + PatchTST 训练 → CosineMatch → GuidedMatch → XGBoost 融合 → 对比图 | `forecast/scripts/run_all.sh` |
-| run_cross_var.sh | 7x7 跨变量 DLinear 实验 + CrossVarFusion + ResidualFusion | `forecast/scripts/run_cross_var.sh` |
-| run_train.sh | PrimitiveFusion 单独训练 | `run_train.sh` (根目录) |
+| run_all.sh | DLinear + PatchTST 训练 → CosineMatch → GuidedMatch → XGBoost 融合 → 对比图 | `scripts/train/run_all.sh` |
+| run_cross_var.sh | 7x7 跨变量 DLinear 实验 + CrossVarFusion + ResidualFusion | `scripts/train/run_cross_var.sh` |
+| run_train.sh | PrimitiveFusion 单独训练 | `scripts/train/run_train.sh` |

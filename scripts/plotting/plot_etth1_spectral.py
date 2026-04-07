@@ -40,7 +40,7 @@ for i, col in enumerate(cols):
 axes1[-1].set_visible(False)
 fig1.suptitle("ETTh1 Train — Power Spectral Density (主周期识别)", fontsize=14)
 plt.tight_layout()
-fig1.savefig("forecast/scripts/etth1_psd.png", dpi=150, bbox_inches="tight")
+fig1.savefig("outputs/figures/data_analysis/etth1_psd.png", dpi=150, bbox_inches="tight")
 plt.close(fig1)
 print("Saved etth1_psd.png")
 
@@ -73,7 +73,7 @@ for i, col in enumerate(other_cols):
 
 fig2.suptitle("ETTh1 Train — Cross-correlation with OT (相位差/滞后)", fontsize=14)
 plt.tight_layout()
-fig2.savefig("forecast/scripts/etth1_xcorr.png", dpi=150, bbox_inches="tight")
+fig2.savefig("outputs/figures/data_analysis/etth1_xcorr.png", dpi=150, bbox_inches="tight")
 plt.close(fig2)
 print("Saved etth1_xcorr.png")
 
@@ -121,7 +121,7 @@ axes3[-1, 1].set_xlabel("Period (hours)")
 
 fig3.suptitle("ETTh1 Train — Cross-spectral Analysis with OT (频域相位差)", fontsize=14)
 plt.tight_layout()
-fig3.savefig("forecast/scripts/etth1_cross_spectral.png", dpi=150, bbox_inches="tight")
+fig3.savefig("outputs/figures/data_analysis/etth1_cross_spectral.png", dpi=150, bbox_inches="tight")
 plt.close(fig3)
 print("Saved etth1_cross_spectral.png")
 

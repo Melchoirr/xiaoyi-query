@@ -15,7 +15,7 @@ from forecast.data_provider.data_factory import data_provider
 RESULT_DIR = 'forecast/results/PrimitiveFusion_ETTh1_M_sl512_pl96'
 CKPT_PATH = 'checkpoints/PrimitiveFusion_ETTh1_M_sl512_pl96/checkpoint.pth'
 CHANNEL_NAMES = ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
-OUTPUT_DIR = 'forecast/scripts/primitive_analysis'
+OUTPUT_DIR = 'outputs/figures/primitive'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 

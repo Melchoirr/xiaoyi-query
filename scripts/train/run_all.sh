@@ -10,7 +10,7 @@ SEQ_LEN=192
 FEATURES=M
 MATCH_TOP_K=400
 
-LOG_DIR="forecast/logs"
+LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 
 # DLinear (original paper: lr=0.005, batch=32, epochs=10)
@@ -54,13 +54,12 @@ mkdir -p "$LOG_DIR"
 
 # Zero-shot foundation models (串行，避免显存冲突)
 # 使用 benchmark.py 统一入口，支持 train/val/test 三种 flag
-# SCRIPT_DIR="$(dirname "$0")"
 # for model in chronos timerxl sundial moirai; do
 #     for data in $DATASETS; do
 #         for pl in $PRED_LENS; do
 #             logfile="${LOG_DIR}/${model}_${data}_${FEATURES}_sl${SEQ_LEN}_pl${pl}.log"
 #             echo ">> 启动 ${model} ${data} pl${pl} -> $logfile"
-#             python -u "${SCRIPT_DIR}/benchmark.py" \
+#             python -u "scripts/benchmark/benchmark.py" \
 #                 --model $model --dataset $data --pred_len $pl \
 #                 --seq_len $SEQ_LEN --features $FEATURES \
 #                 --flags test,val,train \

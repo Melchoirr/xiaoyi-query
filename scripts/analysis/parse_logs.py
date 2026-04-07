@@ -1,14 +1,14 @@
 """Parse experiment logs and generate a CSV summary.
 
-Scans forecast/logs/*.log for lines matching:
+Scans logs/*.log for lines matching:
     RESULT|<setting>|<split>|mse=...|mae=...|rmse=...|mape=...|mspe=...
 
 Setting format: {model}_{data}_{features}_sl{seq_len}_pl{pred_len}
 
 Usage:
-    python forecast/scripts/parse_logs.py                    # default
-    python forecast/scripts/parse_logs.py --log_dir path/    # custom log dir
-    python forecast/scripts/parse_logs.py -o results.csv     # custom output
+    python scripts/analysis/parse_logs.py                    # default
+    python scripts/analysis/parse_logs.py --log_dir path/    # custom log dir
+    python scripts/analysis/parse_logs.py -o results.csv     # custom output
 """
 
 import argparse
@@ -65,9 +65,9 @@ def parse_log(filepath: Path) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description='Parse experiment logs to CSV')
-    parser.add_argument('--log_dir', type=str, default='forecast/logs',
+    parser.add_argument('--log_dir', type=str, default='logs',
                         help='Directory containing .log files')
-    parser.add_argument('-o', '--output', type=str, default='forecast/results_summary.csv',
+    parser.add_argument('-o', '--output', type=str, default='outputs/results_summary.csv',
                         help='Output CSV path')
     args = parser.parse_args()
 

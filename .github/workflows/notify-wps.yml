@@ -1,0 +1,21 @@
+name: Notify WPS on Push
+
+on:
+  push:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send WPS Notification
+        run: |
+          COMMIT_MSG=$(echo '${{ github.event.head_commit.message }}' | head -1)
+          curl -s -X POST \
+            "https://365.kdocs.cn/woa/api/v1/webhook/send?key=${{ secrets.WPS_WEBHOOK_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"msgtype\": \"text\",
+              \"text\": {
+                \"content\": \"xiaoyi-query 代码更新\n分支: ${{ github.ref_name }}\n提交者: ${{ github.actor }}\n信息: ${COMMIT_MSG}\"
+              }
+            }"

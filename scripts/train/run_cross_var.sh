@@ -9,7 +9,7 @@ SEQ_LEN=192
 PRED_LEN=96
 N_CHANNELS=7  # ETTh1: HUFL(0) HULL(1) MUFL(2) MULL(3) LUFL(4) LULL(5) OT(6)
 
-LOG_DIR="forecast/logs/cross_var"
+LOG_DIR="logs/cross_var"
 mkdir -p "$LOG_DIR"
 
 for src in $(seq 0 $((N_CHANNELS - 1))); do

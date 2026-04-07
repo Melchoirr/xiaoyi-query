@@ -7,18 +7,20 @@
 时序预测基准测试与融合框架，在 ETT 数据集上对比三个范式的模型。
 
 ```
-CLI 入口 (run.py) + 批量脚本 (run_all.sh)
+CLI 入口 (forecast/run.py) + 批量脚本 (scripts/train/)
     ↓
-实验引擎 (exp/)
+实验引擎 (forecast/exp/)
     ├── 训练/验证/测试循环
     ├── EarlyStopping + LR 调度
     ↓              ↓
 数据管道           预测模型
-├── ETT Dataset    ├── DLinear / PatchTST (可训练)
-├── DataLoader     ├── Sundial/Chronos/Timer/TimesFM (zero-shot)
-└── 时间特征编码   └── XGBoost Stacking 融合
-    ↓
+├── ETT Dataset    ├── forecast/models/ — DLinear / PatchTST / PrimitiveFusion (可训练)
+├── DataLoader     ├── forecast/baselines/ — CosineMatch / GuidedMatch / PredMatch (非参数)
+└── 时间特征编码   ├── scripts/benchmark/ — Sundial/Chronos/Timer/TimesFM (zero-shot)
+    ↓              └── forecast/fusion/ — XGBoost Stacking 融合
 评估指标 (MAE/MSE/RMSE/MAPE/MSPE)
+    ↓
+产物 → outputs/results/ (数值) + outputs/figures/ (图片)
 ```
 
 ## 功能清单

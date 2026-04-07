@@ -57,7 +57,7 @@ def main():
     parser.add_argument('--freq', type=str, default='h',
                         help='freq for time features: s/t/h/d/b/w/m')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/')
-    parser.add_argument('--result_path', type=str, default='./forecast/results/')
+    parser.add_argument('--result_path', type=str, default='./outputs/results/')
 
     # forecasting task
     parser.add_argument('--seq_len', type=int, default=512)
@@ -170,7 +170,7 @@ def main():
         if args.plot_output:
             sys.argv += ['--output', args.plot_output]
 
-        from forecast.models.PlotFusion import main as plot_main
+        from scripts.plotting.plot_fusion import main as plot_main
         plot_main()
 
     elif args.mode in ('cross_var_fusion', 'residual_fusion'):

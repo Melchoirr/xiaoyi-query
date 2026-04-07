@@ -22,7 +22,7 @@ per_page = 6  # 每张图放 6 个切片
 n_pages = int(np.ceil(n_slices / per_page))
 colors = plt.cm.tab10(np.linspace(0, 1, len(cols)))
 
-outdir = "forecast/scripts/etth1_slices"
+outdir = "outputs/figures/data_analysis/etth1_slices"
 os.makedirs(outdir, exist_ok=True)
 
 for page in range(n_pages):
