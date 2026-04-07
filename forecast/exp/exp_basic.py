@@ -1,6 +1,6 @@
 import os
 import torch
-from forecast.models import DLinear, PatchTST
+from forecast.models import DLinear, PatchTST, PrimitiveFusion
 
 
 class Exp_Basic:
@@ -9,6 +9,7 @@ class Exp_Basic:
         self.model_dict = {
             'DLinear': DLinear,
             'PatchTST': PatchTST,
+            'PrimitiveFusion': PrimitiveFusion,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

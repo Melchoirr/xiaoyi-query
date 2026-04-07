@@ -19,20 +19,21 @@ from pathlib import Path
 
 RESULT_PATTERN = re.compile(
     r'^RESULT\|'
+    r'(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\|'
     r'(?P<setting>[^|]+)\|'
     r'(?P<split>[^|]+)\|'
     r'mse=(?P<mse>[\d.]+)\|'
-    r'mae=(?P<mae>[\d.]+)\|'
-    r'rmse=(?P<rmse>[\d.]+)\|'
-    r'mape=(?P<mape>[\d.]+)\|'
-    r'mspe=(?P<mspe>[\d.]+)$'
+    r'mae=(?P<mae>[\d.]+)'
+    r'(?:\|rmse=(?P<rmse>[\d.]+))?'
+    r'(?:\|mape=(?P<mape>[\d.]+))?'
+    r'(?:\|mspe=(?P<mspe>[\d.]+))?$'
 )
 
 SETTING_PATTERN = re.compile(
     r'^(?P<model>[^_]+)_(?P<data>[^_]+)_(?P<features>[^_]+)_sl(?P<seq_len>\d+)_pl(?P<pred_len>\d+)$'
 )
 
-COLUMNS = ['model', 'data', 'features', 'seq_len', 'pred_len', 'split', 'mse', 'mae', 'rmse', 'mape', 'mspe']
+COLUMNS = ['timestamp', 'model', 'data', 'features', 'seq_len', 'pred_len', 'split', 'mse', 'mae', 'rmse', 'mape', 'mspe']
 METRICS = ['mse', 'mae', 'rmse', 'mape', 'mspe']
 
 
@@ -47,6 +48,7 @@ def parse_log(filepath: Path) -> list[dict]:
         if not sm:
             continue
         row = {
+            'timestamp': m.group('timestamp'),
             'model': sm.group('model'),
             'data': sm.group('data'),
             'features': sm.group('features'),
@@ -54,8 +56,9 @@ def parse_log(filepath: Path) -> list[dict]:
             'pred_len': int(sm.group('pred_len')),
             'split': m.group('split'),
         }
-        for metric in METRICS:
-            row[metric] = float(m.group(metric))
+        for met in METRICS:
+            val = m.group(met)
+            row[met] = float(val) if val else ''
         rows.append(row)
     return rows
 
@@ -88,7 +91,7 @@ def main():
             print(f'  {f.name}: no RESULT lines found')
 
     # Sort: model -> data -> pred_len
-    all_rows.sort(key=lambda r: (r['model'], r['data'], r['pred_len'], r['split']))
+    all_rows.sort(key=lambda r: (r['model'], r['data'], r['pred_len'], r['split'], r['timestamp']))
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

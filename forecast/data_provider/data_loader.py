@@ -9,7 +9,8 @@ from forecast.utils.timefeatures import time_features
 class Dataset_ETT_hour(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+                 target='OT', scale=True, timeenc=0, freq='h',
+                 src_channel=None, tgt_channel=None):
         if size is None:
             self.seq_len = 96
             self.label_len = 48
@@ -28,6 +29,9 @@ class Dataset_ETT_hour(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
+
+        self.src_channel = src_channel
+        self.tgt_channel = tgt_channel
 
         self.root_path = root_path
         self.data_path = data_path
@@ -67,8 +71,15 @@ class Dataset_ETT_hour(Dataset):
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
             data_stamp = data_stamp.transpose(1, 0)
 
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
+        # 跨变量模式：data_x 取 src_channel，data_y 取 tgt_channel
+        if self.src_channel is not None:
+            self.data_x = data[border1:border2, self.src_channel:self.src_channel + 1]
+        else:
+            self.data_x = data[border1:border2]
+        if self.tgt_channel is not None:
+            self.data_y = data[border1:border2, self.tgt_channel:self.tgt_channel + 1]
+        else:
+            self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
 
     def __getitem__(self, index):
@@ -94,7 +105,8 @@ class Dataset_ETT_hour(Dataset):
 class Dataset_ETT_minute(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
-                 target='OT', scale=True, timeenc=0, freq='t'):
+                 target='OT', scale=True, timeenc=0, freq='t',
+                 src_channel=None, tgt_channel=None):
         if size is None:
             self.seq_len = 96
             self.label_len = 48
@@ -113,6 +125,9 @@ class Dataset_ETT_minute(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
+
+        self.src_channel = src_channel
+        self.tgt_channel = tgt_channel
 
         self.root_path = root_path
         self.data_path = data_path
@@ -153,8 +168,14 @@ class Dataset_ETT_minute(Dataset):
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
             data_stamp = data_stamp.transpose(1, 0)
 
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
+        if self.src_channel is not None:
+            self.data_x = data[border1:border2, self.src_channel:self.src_channel + 1]
+        else:
+            self.data_x = data[border1:border2]
+        if self.tgt_channel is not None:
+            self.data_y = data[border1:border2, self.tgt_channel:self.tgt_channel + 1]
+        else:
+            self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
 
     def __getitem__(self, index):

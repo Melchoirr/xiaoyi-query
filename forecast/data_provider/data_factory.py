@@ -33,6 +33,8 @@ def data_provider(args, flag):
         target=args.target,
         timeenc=timeenc,
         freq=freq,
+        src_channel=getattr(args, 'src_channel', None),
+        tgt_channel=getattr(args, 'tgt_channel', None),
     )
     print(flag, len(data_set))
     data_loader = DataLoader(

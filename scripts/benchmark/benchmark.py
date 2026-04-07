@@ -351,8 +351,8 @@ def run_one_flag(model, model_type, args, model_id, num_samples, flag, device):
         trues_3d = targets  # 原始的 [N, pred_len, D]
 
     # 5. 计算指标（在归一化数据上）
-    mse = np.mean((preds_3d - trues_3d) ** 2)
-    mae = np.mean(np.abs(preds_3d - trues_3d))
+    from forecast.utils.metrics import metric as calc_metric
+    mae, mse, rmse, mape, mspe = calc_metric(preds_3d, trues_3d)
 
     # 6. 构建 setting 名并保存
     model_display = MODEL_NAME_MAP.get(model_type, model_type)
@@ -366,11 +366,13 @@ def run_one_flag(model, model_type, args, model_id, num_samples, flag, device):
     os.makedirs(save_dir, exist_ok=True)
     np.save(os.path.join(save_dir, 'pred.npy'), preds_3d)
     np.save(os.path.join(save_dir, 'true.npy'), trues_3d)
-    np.save(os.path.join(save_dir, 'metrics.npy'), np.array([mae, mse]))
+    np.save(os.path.join(save_dir, 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
 
     print(f"  MSE={mse:.4f}, MAE={mae:.4f}")
     print(f"  Saved: {save_dir}/pred.npy  shape={preds_3d.shape}")
-    print(f"RESULT|{setting}|{flag}|mse={mse:.6f}|mae={mae:.6f}")
+    from datetime import datetime
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"RESULT|{ts}|{setting}|{flag}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}")
 
     return mse, mae
 

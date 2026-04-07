@@ -6,8 +6,9 @@ cd "$(dirname "$0")/../.."
 
 DATASETS="ETTh1"
 PRED_LENS="96"
-SEQ_LEN=512
+SEQ_LEN=192
 FEATURES=M
+MATCH_TOP_K=400
 
 LOG_DIR="forecast/logs"
 mkdir -p "$LOG_DIR"
@@ -25,7 +26,7 @@ mkdir -p "$LOG_DIR"
 #             --learning_rate 0.005 --batch_size 32 \
 #             --use_gpu \
 #             --save_val_pred --save_train_pred \
-#             2>&1 | tee "$logfile"
+#             2>&1 | tee -a "$logfile"
 #     done
 # done
 
@@ -47,7 +48,7 @@ mkdir -p "$LOG_DIR"
 #             --dropout 0.2 --fc_dropout 0 --head_dropout 0 \
 #             --revin --use_gpu \
 #             --save_val_pred --save_train_pred \
-#             2>&1 | tee "$logfile"
+#             2>&1 | tee -a "$logfile"
 #     done
 # done
 
@@ -63,7 +64,7 @@ mkdir -p "$LOG_DIR"
 #                 --model $model --dataset $data --pred_len $pl \
 #                 --seq_len $SEQ_LEN --features $FEATURES \
 #                 --flags test,val,train \
-#                 2>&1 | tee "$logfile"
+#                 2>&1 | tee -a "$logfile"
 #         done
 #     done
 # done
@@ -77,8 +78,9 @@ for data in $DATASETS; do
         python -u -m forecast.run \
             --mode cosine_match --data $data --features $FEATURES \
             --seq_len $SEQ_LEN --pred_len $pl \
+            --match_top_k $MATCH_TOP_K \
             --flags test,train,val \
-            2>&1 | tee "$logfile"
+            2>&1 | tee -a "$logfile"
     done
 done
 
@@ -93,7 +95,7 @@ for data in $DATASETS; do
             --mode fusion --data $data --features $FEATURES \
             --seq_len $SEQ_LEN --pred_len $pl \
             --fusion_models $FUSION_MODELS \
-            2>&1 | tee "$logfile"
+            2>&1 | tee -a "$logfile"
     done
 done
 
@@ -104,6 +106,6 @@ python -u -m forecast.run \
     --seq_len $SEQ_LEN --pred_len 96 \
     --plot_models "DLinear,PatchTST" \
     --plot_fusion_model XGBFusion \
-    2>&1 | tee "${LOG_DIR}/plot_fusion.log"
+    2>&1 | tee -a "${LOG_DIR}/plot_fusion.log"
 
 echo "All experiments done! Logs saved to $LOG_DIR/"

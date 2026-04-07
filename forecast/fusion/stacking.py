@@ -132,7 +132,9 @@ class XGBStacking:
                 np.array([mae, mse, rmse, mape, mspe]))
 
         print(f"融合结果: mse={mse:.4f}, mae={mae:.4f}")
-        print(f"RESULT|{fusion_setting}|mse={mse:.6f}|mae={mae:.6f}|"
+        from datetime import datetime
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"RESULT|{ts}|{fusion_setting}|test|mse={mse:.6f}|mae={mae:.6f}|"
               f"rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}")
         print(f"结果已保存到: {fusion_path}")
 

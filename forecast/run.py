@@ -8,12 +8,15 @@ def main():
 
     # basic config
     parser.add_argument('--mode', type=str, default='single',
-                        choices=['single', 'fusion', 'cosine_match', 'plot'],
+                        choices=['single', 'fusion', 'cosine_match', 'plot',
+                                 'cross_var', 'cross_var_fusion', 'residual_fusion'],
                         help='single: 单模型训练/测试; fusion: XGBoost 融合; '
-                             'cosine_match: MSE匹配基线; plot: 融合对比图')
+                             'cosine_match: MSE匹配基线; plot: 融合对比图; '
+                             'cross_var: 跨变量预测(src_channel seq -> tgt_channel pred); '
+                             'cross_var_fusion: 跨变量XGBoost融合')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST'],
+                        choices=['DLinear', 'PatchTST', 'PrimitiveFusion'],
                         help='single 模式下的模型选择')
     parser.add_argument('--fusion_models', type=str,
                         default='DLinear,PatchTST',
@@ -32,12 +35,17 @@ def main():
                         help='plot 模式: 融合模型名')
     parser.add_argument('--plot_output', type=str, default=None,
                         help='plot 模式: 输出图片路径')
-    parser.add_argument('--n_samples', type=int, default=3,
-                        help='cosine_match 模式: 绘图样本数')
-    parser.add_argument('--top_k', type=int, default=10,
-                        help='cosine_match 模式: top-k 匹配展示')
-    parser.add_argument('--do_plot', action='store_true', default=False,
-                        help='cosine_match 模式: 是否绘图')
+    parser.add_argument('--match_top_k', type=int, default=5,
+                        help='cosine_match 模式: 匹配时取前K个最近邻加权平均')
+
+    # cross_var 模式参数
+    parser.add_argument('--src_channel', type=int, default=None,
+                        help='cross_var: 输入变量的列索引 (0-based)')
+    parser.add_argument('--tgt_channel', type=int, default=None,
+                        help='cross_var: 预测目标变量的列索引 (0-based)')
+    parser.add_argument('--fusion_train_flag', type=str, default='train_val',
+                        choices=['train', 'train_val'],
+                        help='cross_var_fusion: 用 train 还是 train+val 训练 XGBoost')
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1')
@@ -76,6 +84,14 @@ def main():
     parser.add_argument('--head_dropout', type=float, default=0.0,
                         help='prediction head dropout')
 
+    # PrimitiveFusion config
+    parser.add_argument('--num_primitives', type=int, default=16,
+                        help='number of primitive codebook entries (K)')
+    parser.add_argument('--primitive_temp', type=float, default=1.0,
+                        help='temperature for primitive soft-assignment')
+    parser.add_argument('--n_cross_layers', type=int, default=1,
+                        help='number of cross-attention layers for primitive fusion')
+
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
     parser.add_argument('--batch_size', type=int, default=128)
@@ -112,7 +128,14 @@ def main():
     if args.fc_dropout is None:
         args.fc_dropout = args.dropout
 
-    setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
+    if args.mode == 'cross_var':
+        args.enc_in = 1
+        args.features = 'M'  # 加载全部列，由 src/tgt_channel 切片
+        setting = (f'{args.model}_{args.data}_crossvar'
+                   f'_src{args.src_channel}_tgt{args.tgt_channel}'
+                   f'_sl{args.seq_len}_pl{args.pred_len}')
+    else:
+        setting = f'{args.model}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
 
     if args.mode == 'cosine_match':
         import sys
@@ -122,16 +145,13 @@ def main():
             '--seq_len', str(args.seq_len),
             '--pred_len', str(args.pred_len),
             '--flags', args.flags,
-            '--n_samples', str(args.n_samples),
-            '--top_k', str(args.top_k),
+            '--match_top_k', str(args.match_top_k),
             '--output_dir', os.path.join(
                 args.result_path,
                 f'CosineMatch_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'),
         ]
-        if args.do_plot:
-            sys.argv.append('--plot')
 
-        from forecast.models.CosineMatch import main as cosine_main
+        from forecast.baselines.CosineMatch import main as cosine_main
         cosine_main()
 
     elif args.mode == 'plot':
@@ -153,6 +173,23 @@ def main():
         from forecast.models.PlotFusion import main as plot_main
         plot_main()
 
+    elif args.mode in ('cross_var_fusion', 'residual_fusion'):
+        setting_template = (f'DLinear_{args.data}_crossvar'
+                            f'_src{{src}}_tgt{{tgt}}'
+                            f'_sl{args.seq_len}_pl{args.pred_len}')
+        flag_suffix = 'train' if args.fusion_train_flag == 'train' else 'trainval'
+
+        if args.mode == 'cross_var_fusion':
+            from forecast.fusion.cross_var_stacking import CrossVarStacking
+            stacker = CrossVarStacking(args.enc_in, args.result_path, setting_template)
+            stacker.train(flag=args.fusion_train_flag)
+            stacker.predict_and_evaluate(fusion_name=f'CrossVarFusion_{flag_suffix}')
+        else:
+            from forecast.fusion.cross_var_stacking import ResidualStacking
+            stacker = ResidualStacking(args.enc_in, args.result_path, setting_template)
+            stacker.train(flag=args.fusion_train_flag)
+            stacker.predict_and_evaluate(fusion_name=f'ResidualFusion_{flag_suffix}')
+
     elif args.mode == 'fusion':
         from forecast.fusion.stacking import XGBStacking
         setting_template = f'{{model}}_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'
@@ -160,7 +197,7 @@ def main():
         stacker = XGBStacking(model_names, args.result_path, setting_template)
         stacker.train()
         stacker.predict_and_evaluate()
-    else:
+    elif args.mode in ('single', 'cross_var'):
         exp = Exp_Long_Term_Forecast(args)
 
         if args.is_training:
@@ -171,7 +208,7 @@ def main():
             exp.test(setting, test=1)
         else:
             print(f'>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-            exp.test(setting)
+            exp.test(setting, test=1)
 
         if args.save_val_pred:
             print(f'>>>>>>>saving val predictions : {setting}<<<<<<<<<<<<<<<<<<')

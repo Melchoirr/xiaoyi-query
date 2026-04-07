@@ -154,7 +154,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print(f'mse:{mse:.4f}, mae:{mae:.4f}')
-        print(f'RESULT|{setting}|{flag}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}')
+        from datetime import datetime
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'RESULT|{ts}|{setting}|{flag}|mse={mse:.6f}|mae={mae:.6f}|rmse={rmse:.6f}|mape={mape:.6f}|mspe={mspe:.6f}')
 
         np.save(os.path.join(result_path, 'pred.npy'), preds)
         np.save(os.path.join(result_path, 'true.npy'), trues)
