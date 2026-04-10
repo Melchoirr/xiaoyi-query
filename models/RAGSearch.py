@@ -43,7 +43,7 @@ class RAGSearch(BaseRetrieverForecaster):
         normalization: str = "standard",
         seed: int = 42,
     ) -> None:
-        super().__init__(seq_len, pred_len, top_k, normalization=normalization, aggregation="softmax")
+        super().__init__(seq_len, pred_len, top_k, normalization=normalization, aggregation_mode="softmax_temp")
         self.recall_k = max(top_k, recall_k)
         self.rag_epochs = rag_epochs
         self.rag_batch_size = rag_batch_size
@@ -101,7 +101,7 @@ class RAGSearch(BaseRetrieverForecaster):
                 loss.backward()
                 opt.step()
 
-    def retrieve(self, query_histories: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def retrieve(self, query_histories: np.ndarray, query_phase: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         q = flatten_windows(self._transform_histories(query_histories))
         d = l2_distance_matrix(q, self._memory_flat)
         k = min(self.recall_k, d.shape[1])
@@ -109,7 +109,7 @@ class RAGSearch(BaseRetrieverForecaster):
         vals = np.take_along_axis(d, idx, axis=1)
         return idx.astype(np.int64), vals.astype(np.float32)
 
-    def rerank(self, query_histories: np.ndarray, candidate_ids: np.ndarray, candidate_scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def rerank(self, query_histories: np.ndarray, candidate_ids: np.ndarray, candidate_scores: np.ndarray, query_phase: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         q = flatten_windows(self._transform_histories(query_histories))
         b, c = candidate_ids.shape
         final_ids = np.zeros((b, self.top_k), dtype=np.int64)

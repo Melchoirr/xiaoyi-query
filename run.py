@@ -7,12 +7,16 @@ from utils.logging_utils import configure_logger
 from utils.seed import set_global_seed
 
 
+ALL_MODELS = [
+    "PatternSearch", "LSHSearch", "SAXSearch", "DTWSearch", "MatrixProfileSearch", "TS2VecSearch", "RAGSearch",
+    "RepeatLastValue", "HistoricalMean", "Top1NearestFuture",
+]
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Retrieval-based time series forecasting")
 
-    p.add_argument("--model", type=str, default="PatternSearch", choices=[
-        "PatternSearch", "LSHSearch", "SAXSearch", "DTWSearch", "MatrixProfileSearch", "TS2VecSearch", "RAGSearch"
-    ])
+    p.add_argument("--model", type=str, default="PatternSearch", choices=ALL_MODELS)
     p.add_argument("--data", type=str, default="ETTh1", choices=["ETTh1", "ETTh2", "ETTm1", "ETTm2"])
     p.add_argument("--root_path", type=str, default="./dataset/")
     p.add_argument("--data_path", type=str, default="ETTh1.csv")
@@ -52,6 +56,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ts2vec_norm", type=str, default="standard")
     p.add_argument("--rag_norm", type=str, default="standard")
 
+    p.add_argument("--future_representation", type=str, default="relative_norm", choices=["raw", "relative_norm", "delta"])
+    p.add_argument("--restoration_mode", type=str, default="auto", choices=["auto", "raw", "none", "relative_norm", "history_stat_norm", "delta"])
+    p.add_argument("--distance_mode", type=str, default="weighted_channel", choices=["target_only", "all_channel_flat", "weighted_channel", "summary_augmented"])
+    p.add_argument("--channel_weights", type=str, default="")
+    p.add_argument("--target_idx", type=int, default=-1)
+
+    p.add_argument("--rerank_mode", type=str, default="none", choices=["none", "exact", "hybrid"])
+    p.add_argument("--rerank_alpha", type=float, default=1.0)
+    p.add_argument("--rerank_beta", type=float, default=0.5)
+    p.add_argument("--rerank_gamma", type=float, default=0.3)
+    p.add_argument("--rerank_delta", type=float, default=0.2)
+
+    p.add_argument("--aggregation_mode", type=str, default="inverse_distance", choices=["mean", "inverse_distance", "softmax_temp", "rank_based", "top1"])
+    p.add_argument("--aggregation_temperature", type=float, default=1.0)
+
+    p.add_argument("--mape_eps", type=float, default=1e-2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--checkpoints", type=str, default="./checkpoints/")
     p.add_argument("--result_path", type=str, default="./results/")
@@ -84,7 +104,7 @@ def infer_dataset_defaults(args) -> None:
 
 def append_summary_csv(csv_path: str, row: dict) -> None:
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    fields = ["model", "dataset", "seq_len", "pred_len", "mae", "mse", "rmse", "mape", "runtime"]
+    fields = ["model", "dataset", "seq_len", "pred_len", "mae", "mse", "rmse", "mape", "smape", "runtime"]
     file_exists = os.path.exists(csv_path)
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -99,7 +119,7 @@ def main() -> None:
     validate_args(args)
     infer_dataset_defaults(args)
 
-    setting = f"{args.model}_{args.data}_sl{args.seq_len}_pl{args.pred_len}_k{args.top_k}"
+    setting = f"{args.model}_{args.data}_sl{args.seq_len}_pl{args.pred_len}_k{args.top_k}_fut{args.future_representation}_dist{args.distance_mode}_agg{args.aggregation_mode}_rer{args.rerank_mode}"
     log_dir = os.path.join(args.result_path, setting)
     logger = configure_logger(log_dir)
 
@@ -119,6 +139,7 @@ def main() -> None:
         "mse": metrics["mse"],
         "rmse": metrics["rmse"],
         "mape": metrics["mape"],
+        "smape": metrics.get("smape", ""),
         "runtime": metrics["runtime"],
     }
     append_summary_csv(os.path.join(args.result_path, "summary.csv"), summary_row)

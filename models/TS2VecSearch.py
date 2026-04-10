@@ -42,7 +42,7 @@ class TS2VecSearch(BaseRetrieverForecaster):
         normalization: str = "standard",
         seed: int = 42,
     ) -> None:
-        super().__init__(seq_len, pred_len, top_k, normalization=normalization, aggregation="softmax")
+        super().__init__(seq_len, pred_len, top_k, normalization=normalization, aggregation_mode="softmax_temp")
         self.hidden_dim = hidden_dim
         self.epochs = epochs
         self.batch_size = batch_size
@@ -86,7 +86,7 @@ class TS2VecSearch(BaseRetrieverForecaster):
         emb = emb / np.clip(np.linalg.norm(emb, axis=1, keepdims=True), 1e-8, None)
         self.memory_embeddings = emb
 
-    def retrieve(self, query_histories: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def retrieve(self, query_histories: np.ndarray, query_phase: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         x = self._transform_histories(query_histories)
         with torch.no_grad():
             q = self.encoder(torch.from_numpy(x).float().to(self.device)).cpu().numpy().astype(np.float32)
