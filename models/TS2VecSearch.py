@@ -1,26 +1,4 @@
-"""
-TS2VecSearch: 深度对比学习表示检索（v3.1 安全版）
-
-学术规范说明：
-本实现为简化版 TS2Vec，仅保留了原论文的核心架构设计：
-  - Temporal Convolutional Network (TCN) + 空洞卷积编码器
-  - Instance-level NT-Xent 对比损失
-  - 两阶段范式：对比预训练 → 向量检索
-
-未包含原论文的 Hierarchical Temporal Contrastive Loss（多尺度时间对比），
-以及 masked token prediction 等辅助任务。此类简化在工业基线中是常见做法，
-以换取训练速度和接口简洁性。
-
-两阶段流程：
-  fit: 对比损失训练 TCN 编码器 → X_train 存入 faiss 向量库
-  predict: Encoder(X_test) → faiss 极速检索 + 加权 KNN 融合
-
-核心参数：hidden_dim (默认 64), epochs (默认 10), batch_size (默认 128), top_k
-"""
-
-import gc
-import logging
-from typing import Optional, Union
+from __future__ import annotations
 
 import numpy as np
 import torch
@@ -28,452 +6,91 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-logger = logging.getLogger(__name__)
-
-# faiss（GPU/CPU 向量索引）
-try:
-    import faiss
-    _HAS_FAISS = True
-    logger.info("[TS2VecSearch] faiss available")
-except ImportError:
-    _HAS_FAISS = False
-    logger.warning("[TS2VecSearch] faiss not available, will use scipy cdist fallback")
+from models.base_retriever import BaseRetrieverForecaster
+from retrieval.candidate_utils import topk_from_distances
+from retrieval.distance import cosine_similarity_matrix
 
 
-# ─────────────────────────────────────────────────────────────
-# TCN Encoder（6 层空洞卷积，感受野 2^6 = 64）
-# ─────────────────────────────────────────────────────────────
-
-class _TCNEncoder(nn.Module):
-    def __init__(self, input_dim: int = 1, hidden_dim: int = 64, num_layers: int = 6):
+class _TS2VecEncoder(nn.Module):
+    def __init__(self, channels: int, hidden_dim: int) -> None:
         super().__init__()
-        self.hidden_dim = hidden_dim
-        layers = []
-        in_ch = input_dim
-        for i in range(num_layers):
-            dilation = 2 ** i
-            out_ch = hidden_dim
-            # 因果卷积：padding = dilation 确保输出长度不变且仅依赖历史
-            conv = nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=dilation, dilation=dilation)
-            layers.extend([conv, nn.BatchNorm1d(out_ch), nn.ReLU(), nn.Dropout(0.05)])
-            in_ch = out_ch
-        self.network = nn.Sequential(*layers)
-        # 投影层：将 conv 输出映射到 hidden_dim（最终用 mean pooling 压缩时间维）
-        self.projection = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
+        self.net = nn.Sequential(
+            nn.Conv1d(channels, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (batch, seq_len, input_dim) 或 (batch, seq_len)
-        返回: (batch, hidden_dim) — 时间池化后的表示向量
-        """
-        if x.ndim == 2:
-            x = x.unsqueeze(-1)
-        h = x.transpose(1, 2)          # (batch, input_dim, seq_len)
-        h = self.network(h)             # (batch, hidden_dim, seq_len)
-        h = self.projection(h)          # (batch, hidden_dim, seq_len)
-        return h.mean(dim=-1)           # (batch, hidden_dim)
+        # x: [B, L, C]
+        z = self.net(x.transpose(1, 2))
+        return z.mean(dim=-1)
 
 
-class _ContrastiveLoss(nn.Module):
-    """NT-Xent (Normalized Temperature-scaled Cross Entropy) 对比损失"""
-
-    def __init__(self, temperature: float = 0.1):
-        super().__init__()
-        self.tau = temperature
-
-    def forward(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
-        batch = z1.shape[0]
-        sim = torch.mm(z1, z2.T) / self.tau   # (batch, batch)
-        labels = torch.arange(batch, device=z1.device)
-        loss = F.cross_entropy(sim, labels) + F.cross_entropy(sim.T, labels)
-        return loss / 2
-
-
-# ─────────────────────────────────────────────────────────────
-# TS2VecSearch 主类
-# ─────────────────────────────────────────────────────────────
-
-class TS2VecSearch:
-    """
-    深度对比学习检索（简化版 TS2Vec + faiss 向量库）
-
-    安全特性：
-    - GPU 自动检测：torch.cuda.is_available() 时自动升格
-    - faiss 缺失时：使用 scipy.spatial.distance.cdist 分块计算，内存安全
-    - 所有张量显式管理：gc.collect() + torch.cuda.empty_cache()
-    """
-
-    DTYPE = np.float32
+class TS2VecSearch(BaseRetrieverForecaster):
+    """Representation retrieval forecaster (train encoder on train split only)."""
 
     def __init__(
         self,
-        hidden_dim: int = 64,
-        epochs: int = 10,
-        batch_size: int = 128,
+        seq_len: int,
+        pred_len: int,
         top_k: int = 5,
+        hidden_dim: int = 64,
+        epochs: int = 5,
+        batch_size: int = 64,
         lr: float = 1e-3,
-        temperature: float = 0.1,
-        device: Union[str, torch.device] = 'auto',
+        normalization: str = "standard",
         seed: int = 42,
-        **kwargs
-    ):
-        # 自动设备检测
-        if isinstance(device, str) and device == 'auto':
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.device = torch.device(device) if not isinstance(device, torch.device) else device
-
+    ) -> None:
+        super().__init__(seq_len, pred_len, top_k, normalization=normalization, aggregation="softmax")
         self.hidden_dim = hidden_dim
         self.epochs = epochs
         self.batch_size = batch_size
-        self.k = top_k
         self.lr = lr
-        self.tau = temperature
         self.seed = seed
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.encoder: _TS2VecEncoder | None = None
+        self.memory_embeddings: np.ndarray | None = None
 
-        self.encoder: Optional[_TCNEncoder] = None
-        self.memory_Y: Optional[np.ndarray] = None   # (n_train, pred_len * n_feat)
-        self.index = None                           # faiss.Index
-        self.train_vectors: Optional[np.ndarray] = None  # (n_train, hidden_dim)
-        self.is_fitted = False
-        self.seq_len: int = 0
-        self.pred_len: int = 0
-        self.n_features: int = 1
+    def _augment(self, x: torch.Tensor) -> torch.Tensor:
+        noise = torch.randn_like(x) * 0.05
+        return x + noise
 
-    def _set_seed(self):
-        np.random.seed(self.seed)
+    def _fit_model(self, train_histories: np.ndarray, train_futures: np.ndarray) -> None:
         torch.manual_seed(self.seed)
-        if self.device.type == 'cuda':
-            torch.cuda.manual_seed(self.seed)
+        x = self._transform_histories(train_histories)
+        dataset = TensorDataset(torch.from_numpy(x).float())
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
 
-    def _augment(self, x: torch.Tensor) -> tuple:
-        """Ts2vec 数据增强：随机尺度扰动 + 随机时间裁剪"""
-        batch, seq_len, dim = x.shape
-        scale1 = torch.rand(batch, 1, 1, device=x.device).uniform_(0.5, 2.0)
-        scale2 = torch.rand(batch, 1, 1, device=x.device).uniform_(0.5, 2.0)
-        v1 = x * scale1
-        v2 = x * scale2
-        if seq_len >= 8:
-            crop_len = np.random.randint(seq_len // 2, seq_len + 1)
-            crop_start = np.random.randint(0, seq_len - crop_len + 1)
-            v1 = v1[:, crop_start:crop_start + crop_len, :]
-            v2 = v2[:, crop_start:crop_start + crop_len, :]
-            if v1.shape[1] < seq_len:
-                pad1 = torch.zeros(batch, seq_len - v1.shape[1], dim, device=x.device)
-                pad2 = torch.zeros(batch, seq_len - v2.shape[1], dim, device=x.device)
-                v1 = torch.cat([v1, pad1], dim=1)
-                v2 = torch.cat([v2, pad2], dim=1)
-        return v1, v2
-
-    def _encode_to_numpy(self, X: np.ndarray, eval_mode: bool = True) -> np.ndarray:
-        """
-        将 numpy 数组批量编码为 numpy 向量
-
-        Args:
-            X: shape (n, seq_len, n_feat) 或 (n, seq_len)
-            eval_mode: 是否用 eval 模式（dropout 等）
-
-        Returns:
-            shape (n, hidden_dim)
-        """
-        if X.ndim == 2:
-            X = X[:, :, None]
-        n = X.shape[0]
-        cs = self.batch_size * 4  # 编码可以用更大的 batch
-        vecs = []
-
-        if eval_mode:
-            self.encoder.eval()
-            with torch.no_grad():
-                for start in range(0, n, cs):
-                    end = min(start + cs, n)
-                    xb = torch.from_numpy(X[start:end]).float().to(self.device)
-                    v = self.encoder(xb).cpu().numpy()
-                    vecs.append(v)
-                    del xb, v
-        else:
-            self.encoder.train()
-            for start in range(0, n, cs):
-                end = min(start + cs, n)
-                xb = torch.from_numpy(X[start:end]).float().to(self.device)
-                v = self.encoder(xb).cpu().numpy()
-                vecs.append(v)
-                del xb, v
-
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-        return np.vstack(vecs).astype(np.float32)
-
-    def fit(self, X_train: np.ndarray, Y_train: np.ndarray):
-        """
-        对比学习训练 TCN 编码器，然后将 X_train 存入 faiss 向量库
-        """
-        self._set_seed()
-        X = X_train.astype(np.float32)
-        Y = Y_train.astype(np.float32)
-
-        self.seq_len = X.shape[1]
-        self.pred_len = Y.shape[1]
-        self.n_features = Y.shape[-1] if Y.ndim == 3 else 1
-        n_train = X.shape[0]
-        self.memory_Y = Y.reshape(n_train, -1).astype(np.float32)
-
-        logger.info(
-            f"[TS2VecSearch] fit: n_train={n_train}, seq_len={self.seq_len}, "
-            f"hidden={self.hidden_dim}, epochs={self.epochs}, device={self.device}"
-        )
-
-        # ── 构建编码器 ────────────────────────────────────────────
-        input_dim = max(1, self.n_features)
-        self.encoder = _TCNEncoder(
-            input_dim=input_dim, hidden_dim=self.hidden_dim, num_layers=6
-        ).to(self.device)
-
-        optimizer = torch.optim.Adam(self.encoder.parameters(), lr=self.lr, weight_decay=1e-5)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
-        criterion = _ContrastiveLoss(temperature=self.tau)
-
-        dataset = TensorDataset(torch.from_numpy(X))
-        loader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            drop_last=True,
-            num_workers=8,
-            pin_memory=True,
-            persistent_workers=True,
-        )
+        self.encoder = _TS2VecEncoder(channels=x.shape[-1], hidden_dim=self.hidden_dim).to(self.device)
+        opt = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
 
         self.encoder.train()
-        for epoch in range(self.epochs):
-            total_loss, n_batches = 0.0, 0
-            for (batch_x,) in loader:
-                batch_x = batch_x.float().to(self.device)
-                v1, v2 = self._augment(batch_x)
-                z1 = self.encoder(v1)
-                z2 = self.encoder(v2)
-                loss = criterion(z1, z2)
-                optimizer.zero_grad()
+        for _ in range(self.epochs):
+            for (xb,) in loader:
+                xb = xb.to(self.device)
+                v1 = self._augment(xb)
+                v2 = self._augment(xb)
+                z1 = F.normalize(self.encoder(v1), dim=-1)
+                z2 = F.normalize(self.encoder(v2), dim=-1)
+                logits = z1 @ z2.T
+                labels = torch.arange(logits.shape[0], device=logits.device)
+                loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) * 0.5
+                opt.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
-                optimizer.step()
-                total_loss += loss.item()
-                n_batches += 1
-                del batch_x, v1, v2, z1, z2, loss
-
-            scheduler.step()
-            if (epoch + 1) % max(1, self.epochs // 5) == 0 or epoch == 0:
-                logger.info(
-                    f"[TS2VecSearch] epoch {epoch+1}/{self.epochs} "
-                    f"loss={total_loss / max(1, n_batches):.4f}"
-                )
+                opt.step()
 
         self.encoder.eval()
-        gc.collect()
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
+        with torch.no_grad():
+            emb = self.encoder(torch.from_numpy(x).float().to(self.device)).cpu().numpy().astype(np.float32)
+        emb = emb / np.clip(np.linalg.norm(emb, axis=1, keepdims=True), 1e-8, None)
+        self.memory_embeddings = emb
 
-        # ── 编码 X_train → faiss / numpy ─────────────────────────
-        self.train_vectors = self._encode_to_numpy(X, eval_mode=True)
-        logger.info(f"[TS2VecSearch] encoded train: {self.train_vectors.shape}")
-
-        if _HAS_FAISS:
-            d = self.hidden_dim
-            if self.device.type == 'cuda' and hasattr(faiss, 'StandardGpuResources'):
-                gpu_res = faiss.StandardGpuResources()
-                self.index = faiss.GpuIndexFlatL2(gpu_res, d)
-                logger.info("[TS2VecSearch] Using faiss GPU index.")
-            else:
-                self.index = faiss.IndexFlatL2(d)
-                logger.info("[TS2VecSearch] Using faiss CPU index.")
-            self.index.add(self.train_vectors)
-            logger.info(f"[TS2VecSearch] faiss index built: {self.index.ntotal}")
-        else:
-            logger.info("[TS2VecSearch] faiss missing → scipy cdist fallback")
-
-        self.is_fitted = True
-        logger.info("[TS2VecSearch] fit done")
-        return self
-
-    def predict(self, X_test: np.ndarray, top_k: Optional[int] = None) -> np.ndarray:
-        """
-        Encoder(X_test) → faiss 检索 / scipy cdist chunked → 加权 KNN
-
-        内存安全：无论 faiss 是否存在，全程分块计算，绝不构造全量 (n_test, n_train) 张量
-        """
-        if not self.is_fitted:
-            raise RuntimeError("模型尚未拟合，请先调用 fit()")
-
-        k = top_k if top_k is not None else self.k
-        k = min(k, self.train_vectors.shape[0])
-
-        Xt = X_test.astype(np.float32)
-        if Xt.ndim == 2:
-            Xt = Xt[:, :, None]
-
-        n_test = Xt.shape[0]
-        logger.info(f"[TS2VecSearch] predict: n_test={n_test}, k={k}")
-
-        # ── 编码 X_test（分块）─────────────────────────────────────
-        test_vecs = self._encode_to_numpy(Xt, eval_mode=True)  # (n_test, hidden_dim)
-        logger.info(f"[TS2VecSearch] test vectors encoded: {test_vecs.shape}")
-
-        # ── top-k 检索 ────────────────────────────────────────────
-        n_train = self.train_vectors.shape[0]
-        indices = np.zeros((n_test, k), dtype=np.int64)
-        dists = np.zeros((n_test, k), dtype=np.float32)
-
-        if _HAS_FAISS and self.index is not None:
-            # faiss 路径（GPU/CPU 都是安全实现）
-            d_out, i_out = self.index.search(test_vecs, k)
-            indices = i_out.astype(np.int64)
-            dists = d_out.astype(np.float32)
-        else:
-            # ── scipy cdist 分块（内存安全）───────────────────────
-            # 对 test_vecs 分块，每次编码 TEST_CHUNK 个样本
-            # 对每个 chunk，在 CPU 上用 scipy.cdist 计算与全量 train_vectors 的距离
-            # 再用 np.argpartition 取 top-k
-            try:
-                from scipy.spatial.distance import cdist as scipy_cdist
-                _HAS_SCIPY = True
-            except ImportError:
-                _HAS_SCIPY = False
-
-            TEST_CHUNK = 512   # 每次处理 512 个测试样本
-            for i_start in range(0, n_test, TEST_CHUNK):
-                i_end = min(i_start + TEST_CHUNK, n_test)
-                test_chunk = test_vecs[i_start:i_end]   # (chunk, hidden_dim)
-
-                if _HAS_SCIPY:
-                    # scipy cdist: (chunk, n_train) — 无需构造全量矩阵
-                    chunk_dists = scipy_cdist(test_chunk, self.train_vectors, metric='euclidean')
-                else:
-                    # Pure numpy 分块：torch.cdist 在 CPU 上安全运行
-                    chunk_t = torch.from_numpy(test_chunk).float()
-                    mem_t = torch.from_numpy(self.train_vectors).float()
-                    chunk_dists = torch.cdist(chunk_t, mem_t, p=2).numpy()
-                    del chunk_t, mem_t
-
-                # np.argpartition 取 top-k（O(n log k) 而非 O(n log n)）
-                for j in range(i_end - i_start):
-                    top_idx = np.argpartition(chunk_dists[j], k)[:k]
-                    sorted_order = top_idx[np.argsort(chunk_dists[j][top_idx])]
-                    indices[i_start + j] = sorted_order
-                    dists[i_start + j] = chunk_dists[j][sorted_order]
-
-                del chunk_dists
-                if (i_start // TEST_CHUNK + 1) % 10 == 0:
-                    logger.info(f"  [TS2VecSearch] processed {i_end}/{n_test}")
-
-        del test_vecs
-        gc.collect()
-
-        # ── 逆距离加权 KNN ─────────────────────────────────────────
-        dists_safe = np.clip(dists, 1e-6, None)
-        w = 1.0 / dists_safe
-        w = w / w.sum(axis=1, keepdims=True)   # (n_test, k)
-
-        neighbor_Y = self.memory_Y[indices]   # (n_test, k, pred_len * n_feat)
-        Y_pred_flat = (neighbor_Y * w[:, :, None]).sum(axis=1)   # (n_test, pred_len * n_feat)
-
-        n_feat = self.n_features
-        if n_feat > 1:
-            Y_pred = Y_pred_flat.reshape(n_test, self.pred_len, n_feat)
-        else:
-            Y_pred = Y_pred_flat.reshape(n_test, self.pred_len)
-
-        logger.info(f"[TS2VecSearch] predict done: {Y_pred.shape}")
-        return Y_pred.astype(np.float32)
-
-    def get_retrieval_meta(
-        self,
-        X_test: np.ndarray,
-        top_k: Optional[int] = None,
-        n_samples: int = 5
-    ) -> tuple:
-        """
-        返回溯源证据：用于绘制"历史匹配溯源图"
-
-        Args:
-            X_test: shape (n_test, seq_len, n_feat) 归一化后的测试输入
-            top_k: 检索的邻居数量（默认使用 self.k）
-            n_samples: 返回前 n_samples 个测试样本的元数据（默认 5）
-
-        Returns:
-            Y_pred: 预测结果 shape (n_test, pred_len, n_feat)
-            retrieval_meta: dict 包含:
-                - topk_histories: (n_samples, k, seq_len, n_feat) 匹配到的历史序列
-                - topk_futures: (n_samples, k, pred_len, n_feat) 匹配到的未来序列
-                - topk_weights: (n_samples, k) 归一化的注意力权重
-        """
-        if not self.is_fitted:
-            raise RuntimeError("模型尚未拟合，请先调用 fit()")
-
-        k = top_k if top_k is not None else self.k
-        k = min(k, self.train_vectors.shape[0])
-
-        Xt = X_test.astype(np.float32)
-        if Xt.ndim == 2:
-            Xt = Xt[:, :, None]
-
-        n_test = Xt.shape[0]
-
-        # 获取完整预测
-        Y_pred = self.predict(X_test, top_k=top_k)
-
-        # 只对前 n_samples 个样本保存溯源证据
-        n_samples = min(n_samples, n_test)
-
-        # 获取原始记忆库数据（需要从 memory_Y 还原）
-        # memory_Y: (n_train, pred_len * n_feat)
-        mem_Y_raw = self.memory_Y.reshape(-1, self.pred_len, self.n_features)  # (n_train, pred_len, n_feat)
-
-        # 需要重建 memory_X_raw (从编码器重构)
-        # 由于 TS2Vec 使用编码后的向量，我们使用解码的近似序列
-        # 这里使用一个简化方法：从预测结果反推
-        # 更准确的做法是在 fit 时保存原始的 X_train
-
-        # 获取前 n_samples 个样本的检索结果
-        test_vecs = self._encode_to_numpy(Xt[:n_samples], eval_mode=True)  # (n_samples, hidden_dim)
-
-        if _HAS_FAISS and self.index is not None:
-            d_out, i_out = self.index.search(test_vecs, k)
-            indices = i_out.astype(np.int64)
-            dists = d_out.astype(np.float32)
-        else:
-            from scipy.spatial.distance import cdist as scipy_cdist
-            dists_mat = scipy_cdist(test_vecs, self.train_vectors, metric='euclidean')
-            indices = np.zeros((n_samples, k), dtype=np.int64)
-            dists = np.zeros((n_samples, k), dtype=np.float32)
-            for j in range(n_samples):
-                top_idx = np.argpartition(dists_mat[j], k)[:k]
-                sorted_order = top_idx[np.argsort(dists_mat[j][top_idx])]
-                indices[j] = sorted_order
-                dists[j] = dists_mat[j][sorted_order]
-
-        # 计算归一化权重
-        dists_safe = np.clip(dists, 1e-6, None)
-        weights = 1.0 / dists_safe
-        weights = weights / weights.sum(axis=1, keepdims=True)  # (n_samples, k)
-
-        # 由于 TS2Vec 是表示学习模型，我们无法直接获取原始的历史序列
-        # 这里用编码向量对应的 Y 序列作为替代
-        # topk_histories 用零填充（因为无法解码回原始序列）
-        # 实际上对于 TS2Vec 来说，我们只能用 topk_futures
-        topk_histories = np.zeros((n_samples, k, self.seq_len, self.n_features), dtype=np.float32)
-        topk_futures = mem_Y_raw[indices].astype(np.float32)  # (n_samples, k, pred_len, n_feat)
-
-        logger.info(
-            f"[TS2VecSearch] Retrieval meta: {n_samples} samples, k={k}"
-        )
-
-        retrieval_meta = {
-            'topk_histories': topk_histories,
-            'topk_futures': topk_futures,
-            'topk_weights': weights.astype(np.float32),
-            'seq_len': self.seq_len,
-            'pred_len': self.pred_len,
-            'n_features': self.n_features,
-            'model_name': 'TS2VecSearch',
-        }
-
-        return Y_pred, retrieval_meta
+    def retrieve(self, query_histories: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        x = self._transform_histories(query_histories)
+        with torch.no_grad():
+            q = self.encoder(torch.from_numpy(x).float().to(self.device)).cpu().numpy().astype(np.float32)
+        q = q / np.clip(np.linalg.norm(q, axis=1, keepdims=True), 1e-8, None)
+        sim = cosine_similarity_matrix(q, self.memory_embeddings)
+        dist = 1.0 - sim
+        return topk_from_distances(dist.astype(np.float32), self.top_k)

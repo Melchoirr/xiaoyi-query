@@ -1,263 +1,139 @@
+from __future__ import annotations
+
 import os
+
 import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset
+
 from utils.timefeatures import time_features
 
 
-class Dataset_ETT_hour(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
-                 features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+class _BaseETTDataset(Dataset):
+    def __init__(
+        self,
+        root_path,
+        flag="train",
+        size=None,
+        features="S",
+        data_path="ETTh1.csv",
+        target="OT",
+        scale=True,
+        timeenc=0,
+        freq="h",
+    ):
         if size is None:
-            self.seq_len = 96
-            self.label_len = 48
-            self.pred_len = 96
+            self.seq_len, self.label_len, self.pred_len = 96, 48, 96
         else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
+            self.seq_len, self.label_len, self.pred_len = size
 
-        assert flag in ['train', 'test', 'val']
-        type_map = {'train': 0, 'val': 1, 'test': 2}
-        self.set_type = type_map[flag]
+        if flag not in {"train", "val", "test"}:
+            raise ValueError("flag must be train/val/test")
 
         self.features = features
         self.target = target
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-
+        self.flag = flag
         self.root_path = root_path
         self.data_path = data_path
-        self.__read_data__()
 
-    def __read_data__(self):
         self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        self._read_data()
 
+    def _get_borders(self):
+        raise NotImplementedError
+
+    def _read_data(self):
+        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+        border1s, border2s = self._get_borders()
+        type_map = {"train": 0, "val": 1, "test": 2}
+        split_idx = type_map[self.flag]
+        border1 = border1s[split_idx]
+        border2 = border2s[split_idx]
+
+        if self.features in {"M", "MS"}:
+            df_data = df_raw[df_raw.columns[1:]]
+        elif self.features == "S":
+            df_data = df_raw[[self.target]]
+        else:
+            raise ValueError("features must be M/MS/S")
+
+        if self.scale:
+            train_data = df_data.iloc[border1s[0]:border2s[0]]
+            self.scaler.fit(train_data.values)
+            data = self.scaler.transform(df_data.values)
+        else:
+            data = df_data.values.astype(np.float32)
+
+        df_stamp = df_raw[["date"]].iloc[border1:border2].copy()
+        df_stamp["date"] = pd.to_datetime(df_stamp["date"])
+        if self.timeenc == 0:
+            df_stamp["month"] = df_stamp["date"].dt.month
+            df_stamp["day"] = df_stamp["date"].dt.day
+            df_stamp["weekday"] = df_stamp["date"].dt.weekday
+            df_stamp["hour"] = df_stamp["date"].dt.hour
+            if self.freq == "t":
+                df_stamp["minute"] = df_stamp["date"].dt.minute
+            data_stamp = df_stamp.drop(columns=["date"]).values
+        else:
+            data_stamp = time_features(pd.to_datetime(df_stamp["date"].values), freq=self.freq)
+            data_stamp = data_stamp.transpose(1, 0)
+
+        self.data_x = data[border1:border2].astype(np.float32)
+        self.data_y = data[border1:border2].astype(np.float32)
+        self.data_stamp = data_stamp.astype(np.float32)
+        self.border1 = border1
+        self.border2 = border2
+
+    def __getitem__(self, index):
+        s_begin = index
+        s_end = s_begin + self.seq_len
+        r_begin = s_end - self.label_len
+        r_end = r_begin + self.label_len + self.pred_len
+
+        seq_x = self.data_x[s_begin:s_end]
+        seq_y = self.data_y[r_begin:r_end]
+        seq_x_mark = self.data_stamp[s_begin:s_end]
+        seq_y_mark = self.data_stamp[r_begin:r_end]
+        return seq_x, seq_y, seq_x_mark, seq_y_mark
+
+    def __len__(self):
+        return len(self.data_x) - self.seq_len - self.pred_len + 1
+
+    def inverse_transform(self, data):
+        arr = np.asarray(data)
+        if arr.ndim == 2:
+            return self.scaler.inverse_transform(arr)
+        if arr.ndim == 3:
+            b, l, c = arr.shape
+            inv = self.scaler.inverse_transform(arr.reshape(-1, c))
+            return inv.reshape(b, l, c)
+        raise ValueError("data must be 2D or 3D")
+
+
+class Dataset_ETT_hour(_BaseETTDataset):
+    def _get_borders(self):
         border1s = [0, 12 * 30 * 24 - self.seq_len, 12 * 30 * 24 + 4 * 30 * 24 - self.seq_len]
         border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
-        border1 = border1s[self.set_type]
-        border2 = border2s[self.set_type]
-
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        elif self.features == 'S':
-            df_data = df_raw[[self.target]]
-
-        if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
-            self.scaler.fit(train_data.values)
-            data = self.scaler.transform(df_data.values)
-        else:
-            data = df_data.values
-
-        df_stamp = df_raw[['date']][border1:border2]
-        df_stamp['date'] = pd.to_datetime(df_stamp['date'])
-        if self.timeenc == 0:
-            df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
-            df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
-            df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
-            df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
-            data_stamp = df_stamp.drop(['date'], axis=1).values
-        elif self.timeenc == 1:
-            data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
-
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-        self.data_stamp = data_stamp
-
-    def __getitem__(self, index):
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
-
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
-
-    def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
-
-    def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
+        return border1s, border2s
 
 
-class Dataset_ETT_minute(Dataset):
-    def __init__(self, root_path, flag='train', size=None,
-                 features='S', data_path='ETTm1.csv',
-                 target='OT', scale=True, timeenc=0, freq='t'):
-        if size is None:
-            self.seq_len = 96
-            self.label_len = 48
-            self.pred_len = 96
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-
-        assert flag in ['train', 'test', 'val']
-        type_map = {'train': 0, 'val': 1, 'test': 2}
-        self.set_type = type_map[flag]
-
-        self.features = features
-        self.target = target
-        self.scale = scale
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path
-        self.__read_data__()
-
-    def __read_data__(self):
-        self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-
-        border1s = [0, 12 * 30 * 24 * 4 - self.seq_len, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - self.seq_len]
-        border2s = [12 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 4 * 30 * 24 * 4, 12 * 30 * 24 * 4 + 8 * 30 * 24 * 4]
-        border1 = border1s[self.set_type]
-        border2 = border2s[self.set_type]
-
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        elif self.features == 'S':
-            df_data = df_raw[[self.target]]
-
-        if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
-            self.scaler.fit(train_data.values)
-            data = self.scaler.transform(df_data.values)
-        else:
-            data = df_data.values
-
-        df_stamp = df_raw[['date']][border1:border2]
-        df_stamp['date'] = pd.to_datetime(df_stamp['date'])
-        if self.timeenc == 0:
-            df_stamp['month'] = df_stamp.date.apply(lambda row: row.month, 1)
-            df_stamp['day'] = df_stamp.date.apply(lambda row: row.day, 1)
-            df_stamp['weekday'] = df_stamp.date.apply(lambda row: row.weekday(), 1)
-            df_stamp['hour'] = df_stamp.date.apply(lambda row: row.hour, 1)
-            df_stamp['minute'] = df_stamp.date.apply(lambda row: row.minute, 1)
-            data_stamp = df_stamp.drop(['date'], axis=1).values
-        elif self.timeenc == 1:
-            data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
-
-        self.data_x = data[border1:border2]
-        self.data_y = data[border1:border2]
-        self.data_stamp = data_stamp
-
-    def __getitem__(self, index):
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        seq_y = self.data_y[r_begin:r_end]
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]
-
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
-
-    def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
-
-    def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
+class Dataset_ETT_minute(_BaseETTDataset):
+    def _get_borders(self):
+        border1s = [
+            0,
+            12 * 30 * 24 * 4 - self.seq_len,
+            12 * 30 * 24 * 4 + 4 * 30 * 24 * 4 - self.seq_len,
+        ]
+        border2s = [
+            12 * 30 * 24 * 4,
+            12 * 30 * 24 * 4 + 4 * 30 * 24 * 4,
+            12 * 30 * 24 * 4 + 8 * 30 * 24 * 4,
+        ]
+        return border1s, border2s
 
 
-# 兼容旧接口
 Dataset_Custom = Dataset_ETT_hour
-
-
-class Dataset_Pred(Dataset):
-    def __init__(self, root_path, data_path, flag='pred', size=None,
-                 features='S', target='OT', scale=True, timeenc=0, freq='h'):
-        if size is None:
-            self.seq_len = 96
-            self.label_len = 48
-            self.pred_len = 96
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
-
-        assert flag in ['pred']
-        self.features = features
-        self.target = target
-        self.scale = scale
-        self.timeenc = timeenc
-        self.freq = freq
-
-        self.root_path = root_path
-        self.data_path = data_path
-        self.__read_data__()
-
-    def __read_data__(self):
-        self.scaler = StandardScaler()
-        df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
-
-        border1 = len(df_raw) - self.seq_len
-        border2 = len(df_raw)
-
-        if self.features == 'M' or self.features == 'MS':
-            cols_data = df_raw.columns[1:]
-            df_data = df_raw[cols_data]
-        elif self.features == 'S':
-            df_data = df_raw[[self.target]]
-
-        data = df_data.values
-
-        if self.scale:
-            self.scaler.fit(data)
-            data = self.scaler.transform(data)
-
-        tmp_stamp = df_raw[['date']][border1:border2]
-        tmp_stamp['date'] = pd.to_datetime(tmp_stamp['date'])
-        if self.timeenc == 0:
-            tmp_stamp['month'] = tmp_stamp.date.apply(lambda row: row.month, 1)
-            tmp_stamp['day'] = tmp_stamp.date.apply(lambda row: row.day, 1)
-            tmp_stamp['weekday'] = tmp_stamp.date.apply(lambda row: row.weekday(), 1)
-            tmp_stamp['hour'] = tmp_stamp.date.apply(lambda row: row.hour, 1)
-            data_stamp = tmp_stamp.drop(['date'], axis=1).values
-        elif self.timeenc == 1:
-            data_stamp = time_features(pd.to_datetime(tmp_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0)
-
-        self.data_x = data[border1:border2]
-        self.data_stamp = data_stamp
-
-    def __getitem__(self, index):
-        s_begin = index
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-
-        seq_x = self.data_x[s_begin:s_end]
-        if r_begin >= 0:
-            seq_y = self.data_x[r_begin:r_end]
-        else:
-            seq_y = np.zeros_like(seq_x)
-
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end] if r_begin >= 0 else \
-            np.zeros((self.label_len + self.pred_len, len(self.data_stamp[0])))
-
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
-
-    def __len__(self):
-        return len(self.data_x) - self.seq_len + 1
-
-    def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)

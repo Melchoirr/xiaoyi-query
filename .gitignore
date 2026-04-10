@@ -51,4 +51,6 @@ dataset
 # OS
 .DS_Store
 Thumbs.db
-Example/
+Example
+reports
+tests

@@ -1,30 +1,27 @@
 from torch.utils.data import DataLoader
+
 from data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute
 
+
 data_dict = {
-    'ETTh1': Dataset_ETT_hour,
-    'ETTh2': Dataset_ETT_hour,
-    'ETTm1': Dataset_ETT_minute,
-    'ETTm2': Dataset_ETT_minute,
+    "ETTh1": Dataset_ETT_hour,
+    "ETTh2": Dataset_ETT_hour,
+    "ETTm1": Dataset_ETT_minute,
+    "ETTm2": Dataset_ETT_minute,
 }
 
 
 def data_provider(args, flag):
-    Data = data_dict[args.data]
-    timeenc = 0 if args.embed != 'timeF' else 1
+    if args.data not in data_dict:
+        raise ValueError(f"unsupported dataset {args.data}")
 
-    if flag == 'test':
-        shuffle_flag = False
-        drop_last = True
-        batch_size = args.batch_size
-    else:
-        shuffle_flag = True
-        drop_last = True
-        batch_size = args.batch_size
+    data_cls = data_dict[args.data]
+    timeenc = 1 if args.embed == "timeF" else 0
 
-    freq = args.freq
+    shuffle_flag = flag == "train"
+    drop_last = flag == "train"
 
-    data_set = Data(
+    dataset = data_cls(
         root_path=args.root_path,
         data_path=args.data_path,
         flag=flag,
@@ -32,14 +29,14 @@ def data_provider(args, flag):
         features=args.features,
         target=args.target,
         timeenc=timeenc,
-        freq=freq,
+        freq=args.freq,
     )
-    print(flag, len(data_set))
-    data_loader = DataLoader(
-        data_set,
-        batch_size=batch_size,
+
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
         shuffle=shuffle_flag,
         num_workers=args.num_workers,
         drop_last=drop_last,
     )
-    return data_set, data_loader
+    return dataset, loader
