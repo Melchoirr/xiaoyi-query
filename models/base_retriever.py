@@ -128,11 +128,15 @@ class BaseRetrieverForecaster(ABC):
             w = np.asarray(self.channel_weights, dtype=np.float32)
             if w.size != c:
                 raise ValueError("channel_weights length mismatch")
+            idx = self.target_idx if self.target_idx >= 0 else c - 1
+            if w[idx] < np.max(w):
+                # Ensure target channel is not accidentally under-weighted.
+                w[idx] = np.max(w)
             return w
         w = np.ones(c, dtype=np.float32)
         idx = self.target_idx if self.target_idx >= 0 else c - 1
         idx = max(0, min(c - 1, idx))
-        w[idx] = 2.0
+        w[idx] = 3.0
         return w
 
     def vectorize_distance(self, x_transformed: np.ndarray) -> np.ndarray:
@@ -159,12 +163,27 @@ class BaseRetrieverForecaster(ABC):
 
         raise ValueError(f"unsupported distance_mode: {self.distance_mode}")
 
+    def _target_candidate_distance(self, query_histories: np.ndarray, candidate_ids: np.ndarray) -> np.ndarray:
+        c = query_histories.shape[2]
+        idx = self.target_idx if self.target_idx >= 0 else c - 1
+        q = query_histories[:, :, idx]
+        m = self.memory_bank.histories[:, :, idx]
+        out = np.zeros(candidate_ids.shape, dtype=np.float32)
+        for i in range(candidate_ids.shape[0]):
+            cand = m[candidate_ids[i]]
+            diff = cand - q[i:i + 1]
+            out[i] = np.sqrt(np.mean(diff * diff, axis=1))
+        return out
+
     def forecast(self, query_histories: np.ndarray, query_phase: Optional[np.ndarray] = None) -> np.ndarray:
         if not self._is_fitted:
             raise RuntimeError("model is not fitted")
 
         q_stats = self._query_stats(query_histories)
         candidate_ids, scores = self.retrieve(query_histories, query_phase=query_phase)
+        pre_ids = candidate_ids.copy()
+        pre_scores = scores.copy()
+        pre_target_dist = self._target_candidate_distance(query_histories, pre_ids)
 
         if self.rerank_mode == "hybrid":
             reranked_ids, reranked_scores, decomp = hybrid_rerank(
@@ -187,6 +206,7 @@ class BaseRetrieverForecaster(ABC):
         else:
             reranked_ids, reranked_scores = self.rerank(query_histories, candidate_ids, scores, query_phase=query_phase)
             decomp = None
+        post_target_dist = self._target_candidate_distance(query_histories, reranked_ids)
 
         candidate_future_repr = self._select_future_rep(reranked_ids)
         pred_repr, weights, agg_stats = aggregate_futures(
@@ -198,11 +218,17 @@ class BaseRetrieverForecaster(ABC):
         pred = self._restore_prediction(pred_repr, q_stats)
 
         self.last_debug = {
+            "pre_candidate_ids": pre_ids,
+            "pre_candidate_scores": pre_scores,
             "candidate_ids": reranked_ids,
             "candidate_scores": reranked_scores,
+            "pre_target_dist": pre_target_dist,
+            "post_target_dist": post_target_dist,
+            "candidate_changed_ratio": float(np.mean(np.any(pre_ids[:, : self.top_k] != reranked_ids, axis=1))),
             "weights": weights,
             "agg_stats": agg_stats,
             "query_mean": q_stats["mean"],
+            "query_last": q_stats["last"],
             "candidate_hist_mean": self.memory_bank.hist_mean[reranked_ids],
             "query_phase": query_phase,
             "candidate_phase": self.memory_bank.phase[reranked_ids] if self.memory_bank.phase is not None else None,

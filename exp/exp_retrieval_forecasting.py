@@ -65,12 +65,46 @@ class Exp_Retrieval_Forecasting(Exp_Basic):
             c_m = dbg["candidate_hist_mean"]
             diff = np.abs(c_m - q_m)
             diag["candidate_query_hist_mean_abs_diff"] = float(diff.mean())
+            target_idx = getattr(self.args, "target_idx", c_m.shape[-1] - 1)
+            diag["candidate_query_hist_mean_abs_diff_target"] = float(np.abs(c_m[:, :, target_idx] - q_m[:, :, target_idx]).mean())
+
+        if "candidate_ids" in dbg and "query_mean" in dbg:
+            q_last = x_last = None
+            # use memory stats if available
+            if hasattr(self.model, "memory_bank") and self.model.memory_bank.hist_last is not None:
+                cand_last = self.model.memory_bank.hist_last[dbg["candidate_ids"]]
+                target_idx = getattr(self.args, "target_idx", cand_last.shape[-1] - 1)
+                # reconstruct query last from raw query mean/std is unavailable; use forecast debug if present
+                if "query_mean" in dbg:
+                    q_last = dbg.get("query_last")
+                if q_last is not None:
+                    ql = q_last[:, None, :]
+                    diag["candidate_query_last_abs_diff"] = float(np.abs(cand_last - ql).mean())
+                    diag["candidate_query_last_abs_diff_target"] = float(np.abs(cand_last[:, :, target_idx] - ql[:, :, target_idx]).mean())
 
         if dbg.get("query_phase") is not None and dbg.get("candidate_phase") is not None:
             q_p = dbg["query_phase"][:, None, :]
             c_p = dbg["candidate_phase"]
             pd = np.linalg.norm(c_p - q_p, axis=-1)
             diag["candidate_phase_l2_mean"] = float(pd.mean())
+
+        if "pre_target_dist" in dbg and "post_target_dist" in dbg:
+            pre = np.asarray(dbg["pre_target_dist"])
+            post = np.asarray(dbg["post_target_dist"])
+            k = min(pre.shape[1], post.shape[1])
+            pre_k = pre[:, :k]
+            post_k = post[:, :k]
+            diag["pre_target_dist_mean"] = float(np.mean(pre_k))
+            diag["post_target_dist_mean"] = float(np.mean(post_k))
+            diag["target_dist_improvement"] = float(np.mean(pre_k - post_k))
+            diag["candidate_changed_ratio"] = float(dbg.get("candidate_changed_ratio", 0.0))
+
+        if "rerank_decomp" in dbg and dbg["rerank_decomp"] is not None:
+            de = dbg["rerank_decomp"]
+            diag["rerank_shape_mean"] = float(np.mean(de["shape"]))
+            diag["rerank_level_mean"] = float(np.mean(de["level"]))
+            diag["rerank_scale_mean"] = float(np.mean(de["scale"]))
+            diag["rerank_phase_mean"] = float(np.mean(de["phase"]))
 
         if "agg_stats" in dbg:
             diag.update(dbg["agg_stats"])

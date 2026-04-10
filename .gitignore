@@ -37,10 +37,9 @@ env/
 .idea/
 
 # Results
-results/
+result*
 *.npy
 *.npz
-result.txt
 
 # Data - keep CSV files, ignore others
 dataset

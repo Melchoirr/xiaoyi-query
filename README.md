@@ -126,3 +126,20 @@ python -m unittest discover -s tests
 ## Notes
 - `MAPE/MSPE` use zero-safe denominators and may return `nan` if all targets are exactly zero.
 - DTW complexity is high; use smaller memory bank or lower `seq_len` for fast experiments.
+
+## Round-3 Notes (Target-aware Retrieval)
+
+### Target index
+- `target_idx` is auto-resolved from dataset columns when `features=M`.
+- For ETT datasets with columns `[HUFL,HULL,MUFL,MULL,LUFL,LULL,OT]`, `target=OT` maps to `target_idx=6`.
+- Default `-1` is no longer used as implicit target.
+
+### Recommended PatternSearch defaults
+- `future_representation=relative_norm`
+- `distance_mode=weighted_channel`
+- `aggregation_mode=mean` (or `inverse_distance` as close second)
+- `rerank_mode=none` for current ETTh1 setting (hybrid rerank did not improve target distance yet)
+
+### Metrics caution
+- Prefer MAE/MSE/RMSE/sMAPE for main comparison.
+- `MAPE/MSPE` uses configurable `mape_eps` to reduce near-zero instability.

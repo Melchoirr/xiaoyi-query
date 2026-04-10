@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import pandas as pd
 
 from exp.exp_retrieval_forecasting import Exp_Retrieval_Forecasting
 from utils.logging_utils import configure_logger
@@ -60,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--restoration_mode", type=str, default="auto", choices=["auto", "raw", "none", "relative_norm", "history_stat_norm", "delta"])
     p.add_argument("--distance_mode", type=str, default="weighted_channel", choices=["target_only", "all_channel_flat", "weighted_channel", "summary_augmented"])
     p.add_argument("--channel_weights", type=str, default="")
-    p.add_argument("--target_idx", type=int, default=-1)
+    p.add_argument("--target_idx", type=int, default=None)
 
     p.add_argument("--rerank_mode", type=str, default="none", choices=["none", "exact", "hybrid"])
     p.add_argument("--rerank_alpha", type=float, default=1.0)
@@ -86,6 +87,8 @@ def validate_args(args) -> None:
         raise ValueError("top_k must be > 0")
     if args.recall_k <= 0:
         raise ValueError("recall_k must be > 0")
+    if args.target_idx is not None and args.target_idx < 0:
+        raise ValueError("target_idx must be >=0 when specified")
 
 
 def infer_dataset_defaults(args) -> None:
@@ -100,6 +103,20 @@ def infer_dataset_defaults(args) -> None:
         args.data_path = default_path
     if args.freq == "h" and default_freq != "h":
         args.freq = default_freq
+
+
+def resolve_target_idx(args) -> None:
+    if args.target_idx is not None:
+        return
+    if args.features == "S":
+        args.target_idx = 0
+        return
+    csv_path = os.path.join(args.root_path, args.data_path)
+    cols = list(pd.read_csv(csv_path, nrows=1).columns)
+    feature_cols = cols[1:]
+    if args.target not in feature_cols:
+        raise ValueError(f"target `{args.target}` not found in feature columns: {feature_cols}")
+    args.target_idx = feature_cols.index(args.target)
 
 
 def append_summary_csv(csv_path: str, row: dict) -> None:
@@ -118,6 +135,7 @@ def main() -> None:
     args = parser.parse_args()
     validate_args(args)
     infer_dataset_defaults(args)
+    resolve_target_idx(args)
 
     setting = f"{args.model}_{args.data}_sl{args.seq_len}_pl{args.pred_len}_k{args.top_k}_fut{args.future_representation}_dist{args.distance_mode}_agg{args.aggregation_mode}_rer{args.rerank_mode}"
     log_dir = os.path.join(args.result_path, setting)
@@ -125,6 +143,13 @@ def main() -> None:
 
     set_global_seed(args.seed, deterministic=True)
     logger.info("Args: %s", vars(args))
+    logger.info(
+        "Effective target config | target_name=%s target_idx=%s distance_mode=%s channel_weights=%s",
+        args.target,
+        args.target_idx,
+        args.distance_mode,
+        args.channel_weights,
+    )
 
     exp = Exp_Retrieval_Forecasting(args)
     exp.train(setting)
