@@ -1,0 +1,7 @@
+/gdelt_gkg_zips
+/data/*.csv
+/data/*.duckdb
+/analysis/*.csv
+/.vscode/
+/result/
+/data/*.txt
