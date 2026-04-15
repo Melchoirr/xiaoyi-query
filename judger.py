@@ -8,7 +8,7 @@ import sys
 # ==========================================
 # ⚙️ 配置区域
 # ==========================================
-INPUT_CSV = "polymarket_dataset_final.csv"
+INPUT_CSV = "polymarket_final_dataset_v3.csv"
 
 # 🌟 绘图配置
 MAX_PLOTS = 5            # 最多绘制多少个市场的图表 (防止市场太多卡死)
