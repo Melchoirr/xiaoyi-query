@@ -1,0 +1,4 @@
+model_name,candidate_n,lexical_prefilter_n,semantic_kept_n,top50_unique_titles,top50_unique_sources,top50_dup_ratio,top50_mean_hybrid,top50_mean_embedding,top50_heuristic_precision,status,error
+all-MiniLM-L6-v2,119855,5000,457,30,42,0.4,0.6034238837614716,0.746963130235672,0.94,ok,
+intfloat/e5-base-v2,119855,5000,5000,44,39,0.12,0.704705136122284,0.8058590459823608,0.44,ok,
+BAAI/bge-large-en-v1.5,119855,5000,3165,42,39,0.16000000000000003,0.5930055026607922,0.6905960440635681,0.7,ok,
