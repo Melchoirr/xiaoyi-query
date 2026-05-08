@@ -1,0 +1,3 @@
+spacy>=3.7
+sparqlwrapper>=2.0
+requests>=2.31
