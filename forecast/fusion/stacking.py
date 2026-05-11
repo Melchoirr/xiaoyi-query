@@ -9,7 +9,7 @@ class XGBStacking:
     def __init__(self, model_names, result_path, setting_template):
         """
         model_names: ['DLinear', 'PatchTST', ...]
-        result_path: './forecast/results/'
+        result_path: './outputs/results/'
         setting_template: '{model}_ETTh1_M_sl96_pl96' ({model} 会被替换)
         """
         self.model_names = model_names

@@ -10,6 +10,8 @@
 - `/catch-up` — 初始化文档或追赶落后的文档状态（扫描代码+git→生成/更新所有文档）
 - `/update-docs` — 日常文档更新（Plan阶段标记计划，Execute阶段根据diff记录实现）
 - `/audit` — 审计未测试区域和潜在问题，输出优先级排序的待办清单
+- `/deliver experiment` — 生成实验结果交付 comment（代码位置、结构、结果分析、产物位置、附件清单）
+- `/deliver engineering` — 生成工程进展交付 comment（代码位置、结构、功能展示、测试情况）
 
 ## 行为规则
 1. 使用 `python` 而非 `python3`

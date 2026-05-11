@@ -127,7 +127,7 @@ def main():
     args = parser.parse_args()
 
     if args.output_dir is None:
-        args.output_dir = f'forecast/results/PredMatch_ETTh1_M_sl{args.seq_len}_pl{args.pred_len}'
+        args.output_dir = f'outputs/results/PredMatch_ETTh1_M_sl{args.seq_len}_pl{args.pred_len}'
     os.makedirs(args.output_dir, exist_ok=True)
 
     flags = args.flags.split(',')

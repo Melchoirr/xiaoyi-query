@@ -171,6 +171,8 @@
 | `/catch-up` | 初始化/追赶文档 | 首次、文档落后、切换分支 |
 | `/update-docs` | 日常更新 | 每次对话结束有变更时 |
 | `/audit` | 审计质量问题 | 按需，支持全局或指定功能 |
+| `/deliver experiment` | 生成实验结果交付 comment | 完成实验需要汇报结果时 |
+| `/deliver engineering` | 生成工程进展交付 comment | 完成工程功能需要交付进展时 |
 
 ---
 

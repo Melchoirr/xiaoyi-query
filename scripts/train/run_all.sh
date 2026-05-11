@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run all model x dataset x pred_len combinations
-# Logs saved to forecast/logs/<setting>.log
+# Logs saved to logs/<setting>.log
 
 cd "$(dirname "$0")/../.."
 

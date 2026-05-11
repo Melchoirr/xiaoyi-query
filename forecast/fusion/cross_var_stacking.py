@@ -15,7 +15,7 @@ class CrossVarStacking:
     def __init__(self, n_channels, result_path, setting_template):
         """
         n_channels: 变量数（ETTh1=7）
-        result_path: './forecast/results/'
+        result_path: './outputs/results/'
         setting_template: 'DLinear_ETTh1_crossvar_src{src}_tgt{tgt}_sl192_pl96'
         """
         self.n_channels = n_channels

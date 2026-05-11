@@ -94,19 +94,7 @@
 
 ## 4. 多变量原语化 (PrimitiveFusion)
 
-| 内容 | 代码 | 产物 | 状态 |
-|------|------|------|------|
-| 模型：K 原语码本 + Cross-Attention | `forecast/models/PrimitiveFusion.py` | — | ✅ |
-| 训练脚本 | `scripts/train/run_train.sh` | `outputs/results/PrimitiveFusion_ETTh1_M_sl{96,512}_pl96/` | ✅ |
-| 分析：逐通道指标 | `scripts/analysis/analyze_primitive_fusion.py` | `outputs/figures/primitive/per_channel_mse.png` | ✅ |
-| 分析：Codebook PCA | 同上 | `outputs/figures/primitive/codebook_pca.png` | ✅ |
-| 分析：Codebook 相似度热力图 | 同上 | `outputs/figures/primitive/codebook_similarity.png` | ✅ |
-| 分析：原语分配热力图 | 同上 | `outputs/figures/primitive/assignment_heatmap.png` | ✅ |
-| 分析：原语利用率 (entropy) | 同上 | `outputs/figures/primitive/primitive_utilization.png` | ✅ |
-
-**结论**：信号机制弱
-
-关键参数：`--num_primitives 16`, `--primitive_temp 1.0`, `--n_cross_layers 1`
+> 已剥离至独立仓库 `primitive-fusion/`
 
 ---
 
@@ -193,7 +181,7 @@ TESS 论文：`docs/papers/TESS_2026.pdf`
   └── residual_fusion  → 残差学习融合
 
 维度 2: 模型类型
-  ├── 可训练: DLinear, PatchTST, PrimitiveFusion
+  ├── 可训练: DLinear, PatchTST
   ├── 零样本: Chronos, Timer, Sundial, TimesFM, Moirai
   └── 非参数: CosineMatch, GuidedMatch, PredMatch
 

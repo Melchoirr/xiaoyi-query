@@ -8,15 +8,15 @@ def main():
 
     # basic config
     parser.add_argument('--mode', type=str, default='single',
-                        choices=['single', 'fusion', 'cosine_match', 'plot',
+                        choices=['single', 'fusion', 'cosine_match', 'retrieval_match', 'plot',
                                  'cross_var', 'cross_var_fusion', 'residual_fusion'],
                         help='single: 单模型训练/测试; fusion: XGBoost 融合; '
-                             'cosine_match: MSE匹配基线; plot: 融合对比图; '
+                             'cosine_match: MSE匹配基线; retrieval_match: 检索式匹配预测; plot: 融合对比图; '
                              'cross_var: 跨变量预测(src_channel seq -> tgt_channel pred); '
                              'cross_var_fusion: 跨变量XGBoost融合')
     parser.add_argument('--is_training', type=int, default=1, help='training or testing')
     parser.add_argument('--model', type=str, default='DLinear',
-                        choices=['DLinear', 'PatchTST', 'PrimitiveFusion'],
+                        choices=['DLinear', 'PatchTST'],
                         help='single 模式下的模型选择')
     parser.add_argument('--fusion_models', type=str,
                         default='DLinear,PatchTST',
@@ -37,6 +37,12 @@ def main():
                         help='plot 模式: 输出图片路径')
     parser.add_argument('--match_top_k', type=int, default=5,
                         help='cosine_match 模式: 匹配时取前K个最近邻加权平均')
+    parser.add_argument('--match_batch_size', type=int, default=512,
+                        help='retrieval_match 模式: query batch size')
+    parser.add_argument('--match_value_weight', type=float, default=1.0,
+                        help='retrieval_match 模式: 数值序列距离权重')
+    parser.add_argument('--match_time_weight', type=float, default=1.0,
+                        help='retrieval_match 模式: 时间特征距离权重')
 
     # cross_var 模式参数
     parser.add_argument('--src_channel', type=int, default=None,
@@ -83,14 +89,6 @@ def main():
                         help='fully-connected dropout (default: same as --dropout)')
     parser.add_argument('--head_dropout', type=float, default=0.0,
                         help='prediction head dropout')
-
-    # PrimitiveFusion config
-    parser.add_argument('--num_primitives', type=int, default=16,
-                        help='number of primitive codebook entries (K)')
-    parser.add_argument('--primitive_temp', type=float, default=1.0,
-                        help='temperature for primitive soft-assignment')
-    parser.add_argument('--n_cross_layers', type=int, default=1,
-                        help='number of cross-attention layers for primitive fusion')
 
     # optimization
     parser.add_argument('--train_epochs', type=int, default=10)
@@ -153,6 +151,31 @@ def main():
 
         from forecast.baselines.CosineMatch import main as cosine_main
         cosine_main()
+
+    elif args.mode == 'retrieval_match':
+        import sys
+        sys.argv = [
+            'retrieval_match',
+            '--data', args.data,
+            '--root_path', args.root_path,
+            '--data_path', args.data_path,
+            '--features', args.features,
+            '--target', args.target,
+            '--freq', args.freq,
+            '--seq_len', str(args.seq_len),
+            '--pred_len', str(args.pred_len),
+            '--flags', args.flags,
+            '--match_top_k', str(args.match_top_k),
+            '--batch_size', str(args.match_batch_size),
+            '--value_weight', str(args.match_value_weight),
+            '--time_weight', str(args.match_time_weight),
+            '--output_dir', os.path.join(
+                args.result_path,
+                f'RetrievalMatch_{args.data}_{args.features}_sl{args.seq_len}_pl{args.pred_len}'),
+        ]
+
+        from forecast.baselines.RetrievalMatch import main as retrieval_main
+        retrieval_main()
 
     elif args.mode == 'plot':
         import sys

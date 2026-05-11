@@ -11,10 +11,10 @@ _, true_preds = build_sequences(splits_norm['test'], 96, 96)
 D = len(col_names)
 
 methods = {
-    'SeqMatch':     'forecast/results/CosineMatch_ETTh1_M_sl96_pl96/pred.npy',
-    'GuidedMatch':  'forecast/results/GuidedMatch_DLinear_ETTh1_M_sl96_pl96/pred.npy',
-    'DLinear':      'forecast/results/DLinear_ETTh1_M_sl96_pl96/pred.npy',
-    'PredMatch':    'forecast/results/PredMatch_ETTh1_M_sl96_pl96/pred.npy',
+    'SeqMatch':     'outputs/results/CosineMatch_ETTh1_M_sl96_pl96/pred.npy',
+    'GuidedMatch':  'outputs/results/GuidedMatch_DLinear_ETTh1_M_sl96_pl96/pred.npy',
+    'DLinear':      'outputs/results/DLinear_ETTh1_M_sl96_pl96/pred.npy',
+    'PredMatch':    'outputs/results/PredMatch_ETTh1_M_sl96_pl96/pred.npy',
 }
 
 # 加载所有预测

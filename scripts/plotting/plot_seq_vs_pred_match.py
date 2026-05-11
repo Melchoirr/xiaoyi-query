@@ -32,7 +32,7 @@ SEQ_LEN = args.seq_len
 PRED_LEN = args.pred_len
 TOP_K = args.top_k
 N_SAMPLES = args.n_samples
-OUTPUT_DIR = f'forecast/results/CosineMatch_ETTh1_M_sl{SEQ_LEN}_pl{PRED_LEN}'
+OUTPUT_DIR = f'outputs/results/CosineMatch_ETTh1_M_sl{SEQ_LEN}_pl{PRED_LEN}'
 
 # ── 加载数据 ──
 print("加载数据...")

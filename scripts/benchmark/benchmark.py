@@ -303,7 +303,7 @@ def get_args():
     parser.add_argument('--features', type=str, default='M',
                         choices=['M', 'S', 'MS'])
     parser.add_argument('--data_dir', type=str, default='./dataset')
-    parser.add_argument('--result_path', type=str, default='./forecast/results/')
+    parser.add_argument('--result_path', type=str, default='./outputs/results/')
     return parser.parse_args()
 
 

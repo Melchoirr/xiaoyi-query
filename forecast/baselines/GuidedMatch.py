@@ -86,7 +86,7 @@ def main():
                         help='逗号分隔: test,train,val')
     parser.add_argument('--match_top_k', type=int, default=5,
                         help='匹配时取前K个最近邻加权平均')
-    parser.add_argument('--result_path', type=str, default='forecast/results')
+    parser.add_argument('--result_path', type=str, default='outputs/results')
     parser.add_argument('--output_dir', type=str, default=None)
     args = parser.parse_args()
 

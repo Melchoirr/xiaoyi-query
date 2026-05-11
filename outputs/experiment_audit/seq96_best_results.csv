@@ -1,0 +1,17 @@
+dataset,horizon,method,mse,mae,root,direction_weight,raw_weight,std_weight,shape_weight
+ETTh1,96,rerank_ci,0.3666915894,0.3945833445,outputs/channel_independent_retrieval_etth1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTh1,192,rerank_ci,0.4139814973,0.4224660993,outputs/channel_independent_retrieval_etth1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTh1,336,shape_baseline_ci,0.4549279511,0.4481609464,outputs/channel_independent_retrieval_etth1_direction_w1p5_k_scheduled_stream_check,0,0,0,1
+ETTh1,720,shape_baseline_ci,0.4669125378,0.4717602432,outputs/channel_independent_retrieval_etth1_direction_w1p5_k_scheduled,0,0,0,1
+ETTh2,96,rerank_ci,0.2929571867,0.3498347700,outputs/channel_independent_retrieval_ett_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTh2,192,rerank_ci,0.3696595430,0.3976756632,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTh2,336,rerank_ci,0.4089503288,0.4232674837,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTh2,720,rerank_ci,0.4365062714,0.4460183084,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTm1,96,rerank_ci,0.3012265563,0.3519093096,outputs/channel_independent_retrieval_ettm1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTm1,192,rerank_ci,0.3448874354,0.3735084236,outputs/channel_independent_retrieval_ettm1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTm1,336,rerank_ci,0.3804868162,0.3969895542,outputs/channel_independent_retrieval_ettm1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTm1,720,rerank_ci,0.4401977658,0.4308693409,outputs/channel_independent_retrieval_ettm1_direction_w1p5_k_scheduled,1.5,0,0,1
+ETTm2,96,rerank_ci,0.1960179061,0.2784650028,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTm2,192,rerank_ci,0.2487825751,0.3101067841,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTm2,336,rerank_ci,0.3029917479,0.3461958170,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1
+ETTm2,720,rerank_ci,0.7468048930,0.4777086675,outputs/channel_independent_retrieval_ett_direction_w1p5_raw0p1_std0p1_k_scheduled_stream,1.5,0.1,0.1,1

@@ -31,3 +31,15 @@ checkpoints/
 # Logs
 logs/
 *.log
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.svg
+*.bmp
+*.tif
+*.tiff
+*.ico

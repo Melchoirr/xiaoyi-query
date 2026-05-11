@@ -23,7 +23,7 @@ def main():
                         help='逗号分隔的基础模型名')
     parser.add_argument('--fusion_model', type=str, default='XGBFusion',
                         help='融合模型名')
-    parser.add_argument('--result_path', type=str, default='./forecast/results')
+    parser.add_argument('--result_path', type=str, default='./outputs/results')
     parser.add_argument('--raw_path', type=str, default='./dataset/ETTh1.csv')
     parser.add_argument('--output', type=str, default=None,
                         help='输出路径，默认 result_path/fusion_comparison.png')
