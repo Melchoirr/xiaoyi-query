@@ -67,6 +67,30 @@ def extract_entities_from_title(title):
         if ent["text"].lower() in KNOWN_TYPES:
             ent["type"] = KNOWN_TYPES[ent["text"].lower()]
 
+    # Fix compound misclassifications: "Will Trump" -> "Trump" as person
+    fixed = []
+    i = 0
+    while i < len(entities):
+        ent = entities[i]
+        text = ent["text"]
+        # "Will Trump" -> skip the "Will" part, use "Trump"
+        if text.lower().startswith("will ") and len(text) > 5:
+            name_part = text[5:].strip()
+            if name_part.lower() in {"trump", "putin", "xi", "biden"}:
+                entities[i] = {"text": name_part, "spacy_label": "PERSON", "type": "person"}
+        # "Fed Chair" -> split into "Fed" (org) + context
+        if text.lower() == "fed chair":
+            entities[i] = {"text": "Federal Reserve", "spacy_label": "ORG", "type": "organization"}
+        # "Fed" when alone -> "Federal Reserve"
+        if text.lower() == "fed" and ent["type"] == "organization":
+            entities[i] = {"text": "Federal Reserve", "spacy_label": "ORG", "type": "organization"}
+        # "U.S." -> "United States"
+        if text.lower() in {"u.s.", "us"}:
+            entities[i] = {"text": "United States", "spacy_label": "GPE", "type": "location"}
+        fixed.append(entities[i])
+        i += 1
+    entities = fixed
+
     # Fallback: extract capitalized multi-word phrases as candidate entities
     if not entities:
         candidates = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', title)
@@ -81,6 +105,25 @@ def extract_entities_from_title(title):
     return entities
 
 
+# Known Q-ID overrides for commonly misidentified entities
+# Only add entries where the Q-ID is verified correct
+KNOWN_QIDS = {
+    "donald trump": "Q22686", "trump": "Q22686",
+    "iran": "Q794", "israel": "Q801",
+    "china": "Q148", "taiwan": "Q865",
+    "russia": "Q159", "ukraine": "Q212",
+    "united states": "Q30", "greenland": "Q223",
+    "united kingdom": "Q145", "uk": "Q145", "india": "Q668",
+}
+# Search-term overrides: use a better search term for Wikidata API
+SEARCH_TERM_OVERRIDES = {
+    "federal reserve": "Federal Reserve System",
+    "the fed": "Federal Reserve System",
+    "fed": "Federal Reserve System",
+    "u.s.": "United States",
+    "us": "United States",
+}
+
 # ---------------------------------------------------------------------------
 # Step 2: Wikidata entity search
 # ---------------------------------------------------------------------------
@@ -88,9 +131,40 @@ def extract_entities_from_title(title):
 def search_wikidata(entity_text, entity_type=None, limit=5, context_words=None):
     """Search Wikidata for an entity, return candidate Q-ID list with scores.
 
-    If the top results are 'family name' / 'surname' and we expect a person,
-    falls back to Wikipedia search + Wikidata ID lookup.
+    Checks KNOWN_QIDS first for well-known entities. Falls back to Wikidata
+    search API + Wikipedia disambiguation when needed.
     """
+    # Fast path: known entity overrides
+    key = entity_text.lower().strip()
+    if key in KNOWN_QIDS:
+        known_qid = KNOWN_QIDS[key]
+        # Do a quick Wikidata lookup to get the label and description
+        time.sleep(WIKIDATA_RATE_LIMIT * 0.5)
+        params = {
+            "action": "wbgetentities",
+            "ids": known_qid,
+            "props": "labels|descriptions",
+            "languages": "en",
+            "format": "json",
+        }
+        headers = {"User-Agent": "KnowledgeGraphBot/1.0 (research project)"}
+        try:
+            resp = requests.get(WIKIDATA_SEARCH_URL, params=params, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("entities", {}).get(known_qid, {})
+                label = data.get("labels", {}).get("en", {}).get("value", entity_text)
+                desc = data.get("descriptions", {}).get("en", {}).get("value", "")
+                return [{
+                    "qid": known_qid, "label": label,
+                    "description": desc, "score": 100,
+                    "url": f"//www.wikidata.org/wiki/{known_qid}",
+                }]
+        except Exception:
+            pass
+
+    # Apply search-term overrides
+    search_text = SEARCH_TERM_OVERRIDES.get(key, entity_text)
+
     time.sleep(WIKIDATA_RATE_LIMIT)
 
     def _do_wikidata_search(search_text):

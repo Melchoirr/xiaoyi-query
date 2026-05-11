@@ -15,7 +15,8 @@ import argparse
 import sys
 from polymarket_client import run_polymarket_pipeline
 from entity_linker import run_entity_linking
-from knowledge_graph import build_graph, GDELTMatcher, KnowledgeGraphDB
+from knowledge_graph import build_graph, KnowledgeGraphDB
+from gdelt_matcher import RealGDELTMatcher
 from llm_enricher import LLMEnricher, merge_llm_relations
 
 
@@ -75,23 +76,20 @@ def main():
     db.load_from_graph(graph)
     print("  SQLite DB ready")
 
-    # Step 6: Demo GDELT matcher
+    # Step 6: Real GDELT matcher
     print("\n" + "=" * 60)
-    print("STEP 6: GDELT matcher demo (mock)")
+    print("STEP 6: GDELT matcher (DuckDB/KG-based)")
     print("=" * 60)
-    matcher = GDELTMatcher(graph)
+    matcher = RealGDELTMatcher(graph)
     for evt_id in list(graph["event_entity_index"].keys())[:3]:
         result = matcher.match_news(evt_id)
-        qids = result["matched_entities"]
+        entities = result["matched_entities"]
+        articles = result["articles"]
         print(f"  Event: {evt_id}")
-        if qids:
-            for e in qids:
-                source_tag = ""
-                if e.get("source") == "llm":
-                    source_tag = " [LLM]"
-                print(f"    Entity: {e['label']} ({e['qid']}) - {e['type']}{source_tag}")
-        else:
-            print("    No entities found (need better NER/Wikidata match)")
+        print(f"    Search terms: {result['search_terms'][:8]}")
+        print(f"    Articles matched: {result['total_matched']:,}")
+        print(f"    Core entities: {', '.join(e['label'] + ' (' + e['qid'] + ')' for e in entities)}")
+    matcher.close()
 
     print("\n" + "=" * 60)
     print("Pipeline complete.")

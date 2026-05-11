@@ -1,0 +1,5 @@
+/data/*
+/gdelt_gkg_zips/
+/result/
+__pycache__/
+.vscode/
